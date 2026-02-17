@@ -6,12 +6,14 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT,
     first_name TEXT,
     balance INTEGER DEFAULT 100,
+    gems INTEGER DEFAULT 0,  -- Кристаллы (премиум валюта)
     prestige_level INTEGER DEFAULT 0,
     prestige_multiplier REAL DEFAULT 1.0,
     city_level INTEGER DEFAULT 0,
     total_harvested INTEGER DEFAULT 0,
     total_planted INTEGER DEFAULT 0,
     total_earned INTEGER DEFAULT 0,
+    total_spent INTEGER DEFAULT 0,  -- Всего потрачено
     joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     is_banned INTEGER DEFAULT 0,
@@ -128,26 +130,98 @@ CREATE TABLE IF NOT EXISTS user_quests (
     FOREIGN KEY (quest_id) REFERENCES quests(quest_id) ON DELETE CASCADE
 );
 
+-- ==================== СИСТЕМА ДОСТИЖЕНИЙ (АЧИВОК) ====================
+
+-- Категории достижений
+CREATE TABLE IF NOT EXISTS achievement_categories (
+    category_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    icon TEXT DEFAULT '🏆',
+    description TEXT,
+    sort_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Шаблоны достижений
 CREATE TABLE IF NOT EXISTS achievements (
     achievement_id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL,
-    icon TEXT DEFAULT '🏆',
-    requirement_type TEXT NOT NULL,
+    icon TEXT DEFAULT '🏅',
+    category_id TEXT NOT NULL,
+    
+    -- Тип достижения: regular (обычное), multi (многоуровневое), secret (секретное), event (ивентовое)
+    achievement_type TEXT DEFAULT 'regular' CHECK(achievement_type IN ('regular', 'multi', 'secret', 'event')),
+    
+    -- Для многоуровневых: родительская ачивка и уровень
+    parent_achievement_id INTEGER DEFAULT NULL,
+    level INTEGER DEFAULT 1,
+    
+    -- Для ивентовых: дата окончания
+    event_end_date TIMESTAMP DEFAULT NULL,
+    
+    -- Цель достижения
+    requirement_type TEXT NOT NULL, -- harvest, plant, earn, spend, prestige, streak_days, login_days
     requirement_count INTEGER NOT NULL,
+    requirement_item TEXT DEFAULT NULL, -- конкретный предмет (для harvest/plant конкретной культуры)
+    
+    -- Награды
     reward_coins INTEGER DEFAULT 0,
-    reward_multiplier REAL DEFAULT 0
+    reward_gems INTEGER DEFAULT 0,
+    reward_items_json TEXT DEFAULT '{}', -- {"item_code": quantity}
+    reward_multiplier REAL DEFAULT 0,
+    
+    -- Настройки
+    is_active INTEGER DEFAULT 1,
+    is_secret INTEGER DEFAULT 0, -- скрыто до выполнения
+    sort_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (category_id) REFERENCES achievement_categories(category_id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_achievement_id) REFERENCES achievements(achievement_id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS user_achievements (
+-- Прогресс игроков по достижениям
+CREATE TABLE IF NOT EXISTS player_achievements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     achievement_id INTEGER NOT NULL,
-    unlocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id, achievement_id),
+    progress INTEGER DEFAULT 0,
+    completed INTEGER DEFAULT 0,
+    reward_claimed INTEGER DEFAULT 0,
+    completed_at TIMESTAMP DEFAULT NULL,
+    claimed_at TIMESTAMP DEFAULT NULL,
+    notified INTEGER DEFAULT 0, -- было ли отправлено уведомление о выполнении
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, achievement_id),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (achievement_id) REFERENCES achievements(achievement_id) ON DELETE CASCADE
 );
+
+-- История получения достижений
+CREATE TABLE IF NOT EXISTS achievement_logs (
+    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    achievement_id INTEGER NOT NULL,
+    action TEXT NOT NULL, -- progress_updated, completed, reward_claimed
+    progress_before INTEGER DEFAULT NULL,
+    progress_after INTEGER DEFAULT NULL,
+    reward_claimed TEXT DEFAULT NULL, -- JSON с полученными наградами
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (achievement_id) REFERENCES achievements(achievement_id) ON DELETE CASCADE
+);
+
+-- Индексы для быстрого поиска
+CREATE INDEX IF NOT EXISTS idx_achievements_category ON achievements(category_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_achievements_type ON achievements(achievement_type, is_active);
+CREATE INDEX IF NOT EXISTS idx_achievements_requirement ON achievements(requirement_type, is_active);
+CREATE INDEX IF NOT EXISTS idx_player_achievements_user ON player_achievements(user_id, completed);
+CREATE INDEX IF NOT EXISTS idx_player_achievements_claimed ON player_achievements(user_id, completed, reward_claimed);
+CREATE INDEX IF NOT EXISTS idx_achievement_logs_user ON achievement_logs(user_id, created_at);
 
 -- СЕЗОННЫЕ СОБЫТИЯ
 CREATE TABLE IF NOT EXISTS seasonal_events (
@@ -287,24 +361,6 @@ CREATE INDEX IF NOT EXISTS idx_security_user ON security_logs(user_id, created_a
 CREATE INDEX IF NOT EXISTS idx_security_event ON security_logs(event_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_security_admin ON security_logs(admin_id, created_at);
 
--- Логи ачивок (получение, прогресс)
-CREATE TABLE IF NOT EXISTS achievement_logs (
-    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    achievement_id TEXT NOT NULL,
-    achievement_name TEXT,
-    category_id TEXT,
-    progress_before INTEGER,
-    progress_after INTEGER,
-    is_completed INTEGER DEFAULT 0,
-    reward_earned TEXT, -- JSON
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(user_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_achievement_user ON achievement_logs(user_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_achievement_id ON achievement_logs(achievement_id, created_at);
-
 -- Логи промо (активации, создания)
 CREATE TABLE IF NOT EXISTS promo_logs (
     log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -365,18 +421,54 @@ INSERT OR REPLACE INTO quests (quest_type, target_item, target_count, descriptio
 ('earn', NULL, 1000, 'Заработай 1000 монет', 100, '{"super_fertilizer":1}', 1),
 ('login', NULL, 1, 'Зайди в игру сегодня', 25, '{}', 1);
 
--- Достижения
-INSERT OR REPLACE INTO achievements (code, name, description, icon, requirement_type, requirement_count, reward_coins, reward_multiplier) VALUES
-('first_harvest', 'Первый урожай', 'Собери свой первый урожай', '🌾', 'harvest', 1, 50, 0),
-('harvester_10', 'Сборщик', 'Собери 10 растений', '🌾', 'harvest', 10, 100, 0),
-('harvester_100', 'Опытный фермер', 'Собери 100 растений', '🚜', 'harvest', 100, 500, 0.1),
-('harvester_1000', 'Фермер месяца', 'Собери 1000 растений', '👑', 'harvest', 1000, 5000, 0.5),
-('rich_1000', 'Богач', 'Заработай 1000 монет', '💰', 'earn', 1000, 200, 0),
-('rich_10000', 'Миллионер', 'Заработай 10000 монет', '💎', 'earn', 10000, 1000, 0.2),
-('planter_50', 'Сеятель', 'Посади 50 семян', '🌱', 'plant', 50, 200, 0),
-('planter_500', 'Мастер посадок', 'Посади 500 семян', '🌳', 'plant', 500, 1000, 0.1),
-('prestige_1', 'Престиж I', 'Достигни 1 уровня престижа', '⭐', 'prestige', 1, 1000, 0),
-('prestige_5', 'Престиж V', 'Достигни 5 уровня престижа', '🌟', 'prestige', 5, 10000, 0);
+-- ==================== НАЧАЛЬНЫЕ ДАННЫЕ ДЛЯ СИСТЕМЫ АЧИВОК ====================
+
+-- Категории достижений
+INSERT OR REPLACE INTO achievement_categories (category_id, name, icon, description, sort_order) VALUES
+('harvest', 'Сбор урожая', '🌾', 'Достижения за сбор растений', 1),
+('finance', 'Финансы', '💰', 'Достижения за накопление и трату монет', 2),
+('prestige', 'Престиж', '🏆', 'Достижения за повышение престижа', 3),
+('activity', 'Активность', '📅', 'Достижения за ежедневные входы', 4),
+('special', 'Особые', '🎯', 'Уникальные достижения', 5),
+('events', 'Ивенты', '🎮', 'Временные события', 6);
+
+-- 🌾 СБОР УРОЖАЯ (многоуровневые ачивки)
+INSERT OR REPLACE INTO achievements (code, name, description, icon, category_id, achievement_type, level, requirement_type, requirement_count, reward_coins, reward_gems, sort_order) VALUES
+('harvest_1', 'Новичок-сборщик', 'Собрать 100 растений', '🥉', 'harvest', 'multi', 1, 'harvest', 100, 500, 0, 1),
+('harvest_2', 'Опытный фермер', 'Собрать 1000 растений', '🥈', 'harvest', 'multi', 2, 'harvest', 1000, 2000, 50, 2),
+('harvest_3', 'Профессионал', 'Собрать 10,000 растений', '🥇', 'harvest', 'multi', 3, 'harvest', 10000, 10000, 200, 3),
+('harvest_4', 'Мастер урожая', 'Собрать 100,000 растений', '👑', 'harvest', 'multi', 4, 'harvest', 100000, 100000, 1000, 4);
+
+-- 💰 ФИНАНСЫ
+INSERT OR REPLACE INTO achievements (code, name, description, icon, category_id, requirement_type, requirement_count, reward_coins, reward_gems, sort_order) VALUES
+('first_1000', 'Первые 1000', 'Заработать 1000 монет', '💵', 'finance', 'earn', 1000, 100, 0, 1),
+('millionaire', 'Миллионер', 'Заработать 1,000,000 монет', '💎', 'finance', 'earn', 1000000, 10000, 100, 2),
+('spender_100k', 'Тратилка', 'Потратить 100,000 монет', '💸', 'finance', 'spend', 100000, 5000, 25, 3),
+('balance_10k', 'Накопитель', 'Иметь 10,000 монет на балансе', '💰', 'finance', 'balance', 10000, 1000, 10, 4);
+
+-- 📅 АКТИВНОСТЬ (многоуровневые)
+INSERT OR REPLACE INTO achievements (code, name, description, icon, category_id, achievement_type, level, requirement_type, requirement_count, reward_coins, reward_gems, sort_order) VALUES
+('streak_3', 'Зашел на огонек', '3 дня подряд', '🔥', 'activity', 'multi', 1, 'streak_days', 3, 300, 0, 1),
+('streak_7', 'Неделя фермера', '7 дней подряд', '⭐', 'activity', 'multi', 2, 'streak_days', 7, 1000, 30, 2),
+('streak_30', 'Месяц в игре', '30 дней подряд', '🌟', 'activity', 'multi', 3, 'streak_days', 30, 5000, 100, 3);
+
+-- 🏆 ПРЕСТИЖ
+INSERT OR REPLACE INTO achievements (code, name, description, icon, category_id, requirement_type, requirement_count, reward_coins, reward_gems, reward_multiplier, sort_order) VALUES
+('prestige_1', 'Первый престиж', 'Достичь 1 уровня престижа', '⭐', 'prestige', 'prestige', 1, 1000, 0, 0.1, 1),
+('prestige_5', 'Мастер престижа', 'Достичь 5 уровня престижа', '🌟', 'prestige', 'prestige', 5, 10000, 50, 0.3, 2),
+('prestige_10', 'Легенда', 'Достичь 10 уровня престижа', '👑', 'prestige', 'prestige', 10, 50000, 200, 0.5, 3);
+
+-- 🌱 ПОСАДКИ (многоуровневые)
+INSERT OR REPLACE INTO achievements (code, name, description, icon, category_id, achievement_type, level, requirement_type, requirement_count, reward_coins, reward_gems, sort_order) VALUES
+('plant_10', 'Садовник', 'Посадить 10 растений', '🌱', 'harvest', 'multi', 1, 'plant', 10, 100, 0, 10),
+('plant_100', 'Сеятель', 'Посадить 100 растений', '🌿', 'harvest', 'multi', 2, 'plant', 100, 500, 10, 11),
+('plant_1000', 'Мастер посадок', 'Посадить 1000 растений', '🌳', 'harvest', 'multi', 3, 'plant', 1000, 2000, 50, 12);
+
+-- 🎯 ОСОБЫЕ (секретные)
+INSERT OR REPLACE INTO achievements (code, name, description, icon, category_id, achievement_type, is_secret, requirement_type, requirement_count, reward_coins, reward_gems, sort_order) VALUES
+('secret_first_harvest', 'Первые шаги', 'Собрать первый урожай', '🎁', 'special', 'secret', 1, 'harvest', 1, 100, 5, 1),
+('secret_night_owl', 'Сова', 'Собрать урожай в ночное время', '🦉', 'special', 'secret', 1, 'harvest', 1, 500, 20, 2),
+('secret_lucky', 'Везунчик', 'Получить редкий предмет', '🍀', 'special', 'secret', 1, 'rare_item', 1, 1000, 50, 3);
 
 -- Сезонные семена
 INSERT OR REPLACE INTO shop_config (item_code, item_name, item_icon, buy_price, sell_price, growth_time, category, sort_order, is_seasonal, season) VALUES
