@@ -9,6 +9,7 @@ import os
 
 from handlers import router as player_router
 from admin_panel import router as admin_router
+from achievements_admin import router as achievements_admin_router
 from database import get_database
 
 load_dotenv()
@@ -97,6 +98,7 @@ async def main():
     
     dp.include_router(player_router)
     dp.include_router(admin_router)
+    dp.include_router(achievements_admin_router)
     
     # Инициализация БД (синглтон)
     db = await get_database()
