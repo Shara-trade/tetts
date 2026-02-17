@@ -75,41 +75,7 @@ def get_role_emoji(role: str) -> str:
 @router.message(Command("admin"))
 async def admin_main_menu(message: Message, state: FSMContext):
     """Главное меню админ-панели"""
-    await state.clear()
-    
-    role = await check_admin_access(message.from_user.id)
-    if not role:
-        await message.answer("⛔ У тебя нет доступа к админ-панели!")
-        return
-    
-    # Формируем кнопки в зависимости от роли
-    buttons = [
-        [InlineKeyboardButton(text="👥 Игроки", callback_data="admin_players")],
-        [InlineKeyboardButton(text="🌱 Растения", callback_data="admin_plants")],
-        [InlineKeyboardButton(text="💰 Экономика", callback_data="admin_economy")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-        [InlineKeyboardButton(text="❓ Помощь", callback_data="admin_help")],
-    ]
-    
-    # Admin и Creator видят дополнительные разделы
-    if role in ('admin', 'creator'):
-        buttons.insert(2, [InlineKeyboardButton(text="🎁 Промо-акции", callback_data="admin_promo")])
-        buttons.insert(3, [InlineKeyboardButton(text="⭐ Ежедневный бонус", callback_data="admin_daily")])
-    
-    # Только Creator видит управление админами и логи
-    if role == 'creator':
-        buttons.append([InlineKeyboardButton(text="👑 Управление админами", callback_data="admin_manage_admins")])
-        buttons.append([InlineKeyboardButton(text="📊 Логи действий", callback_data="admin_logs")])
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    await message.answer(
-        f"{get_role_emoji(role)} <b>Админ-панель</b>\n\n"
-        f"Твоя роль: <b>{role.upper()}</b>\n\n"
-        f"Выбери раздел:",
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
+    await show_admin_menu_internal(message, message.from_user.id, state)
 
 # ==================== РАЗДЕЛ «ИГРОКИ» ====================
 
@@ -411,17 +377,60 @@ async def execute_ban(message_or_callback, state: FSMContext, hours: int = None)
 
 # ==================== НАЗАД ====================
 
+async def show_admin_menu_internal(target, user_id: int, state: FSMContext = None):
+    """Внутренняя функция для показа меню админки"""
+    if state:
+        await state.clear()
+    
+    role = await check_admin_access(user_id)
+    if not role:
+        if isinstance(target, CallbackQuery):
+            await target.answer("⛔ У тебя нет доступа к админ-панели!", show_alert=True)
+        return
+    
+    # Формируем кнопки в зависимости от роли
+    buttons = [
+        [InlineKeyboardButton(text="👥 Игроки", callback_data="admin_players")],
+        [InlineKeyboardButton(text="🌱 Растения", callback_data="admin_plants")],
+        [InlineKeyboardButton(text="💰 Экономика", callback_data="admin_economy")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="❓ Помощь", callback_data="admin_help")],
+    ]
+    
+    # Admin и Creator видят дополнительные разделы
+    if role in ('admin', 'creator'):
+        buttons.insert(2, [InlineKeyboardButton(text="🎁 Промо-акции", callback_data="admin_promo")])
+        buttons.insert(3, [InlineKeyboardButton(text="⭐ Ежедневный бонус", callback_data="admin_daily")])
+        buttons.insert(4, [InlineKeyboardButton(text="🏆 Управление ачивками", callback_data="admin_achievements")])
+    
+    # Только Creator видит управление админами и логи
+    if role == 'creator':
+        buttons.append([InlineKeyboardButton(text="👑 Управление админами", callback_data="admin_manage_admins")])
+        buttons.append([InlineKeyboardButton(text="📊 Логи действий", callback_data="admin_logs")])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    text = (
+        f"{get_role_emoji(role)} <b>Админ-панель</b>\n\n"
+        f"Твоя роль: <b>{role.upper()}</b>\n\n"
+        f"Выбери раздел:"
+    )
+    
+    if isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    else:
+        await target.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
 @router.callback_query(F.data == "admin_back_main")
 async def admin_back_to_main(callback: CallbackQuery, state: FSMContext):
     """Возврат в главное меню"""
-    await state.clear()
-    await admin_main_menu(callback.message, state)
+    await show_admin_menu_internal(callback, callback.from_user.id, state)
 
 @router.callback_query(F.data == "admin_cancel")
 async def admin_cancel(callback: CallbackQuery, state: FSMContext):
-    """Отмена действия"""
-    await state.clear()
-    await callback.message.edit_text("❌ Действие отменено")
+    """Отмена действия - возврат в меню"""
+    await show_admin_menu_internal(callback, callback.from_user.id, state)
 
 # ==================== СИСТЕМА ЛОГИРОВАНИЯ ====================
 
