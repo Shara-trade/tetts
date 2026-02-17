@@ -133,23 +133,36 @@ async def buy_plant(callback: CallbackQuery, state: FSMContext):
     await db.update_balance(callback.from_user.id, -crop["buy_price"])
     await db.plant_crop(callback.from_user.id, plot_num, item_code, crop["growth_time"])
     
-    # Обновляем квесты и достижения
+    # Обновляем квесты
     await db.execute(
         "UPDATE users SET total_planted = total_planted + 1 WHERE user_id = ?",
         (callback.from_user.id,), commit=True
     )
     await db.update_quest_progress(callback.from_user.id, 'plant', 1)
-    new_achievements = await db.check_achievements(callback.from_user.id)
     
-    # Показываем уведомления о достижениях
-    if new_achievements:
-        for ach in new_achievements:
-            await callback.message.answer(
-                f"🎉 <b>Новое достижение!</b>\n\n"
-                f"{ach['icon']} <b>{ach['name']}</b>\n"
-                f"🎁 Награда: {ach['reward_coins']}🪙",
-                parse_mode="HTML"
-            )
+    # ===== ПРОВЕРКА АЧИВОК (НОВАЯ СИСТЕМА) =====
+    completed_achs = await db.check_and_update_achievements(
+        callback.from_user.id, "plant", count=1
+    )
+
+    # Проверяем трату монет для финансовых ачивок
+    await db.check_and_update_achievements(
+        callback.from_user.id, "spend", count=crop["buy_price"]
+    )
+
+    # Отправляем уведомления о новых ачивках
+    for ach in completed_achs:
+        rewards_text = f"{ach['reward_coins']:,}🪙"
+        if ach['reward_gems'] > 0:
+            rewards_text += f" + {ach['reward_gems']}💎"
+        
+        await callback.message.answer(
+            f"🎉 <b>НОВОЕ ДОСТИЖЕНИЕ!</b>\n\n"
+            f"{ach['icon']} <b>{ach['name']}</b>\n"
+            f"🎁 Награда: {rewards_text}\n\n"
+            f"🏆 <b>Мои ачивки</b> - чтобы забрать награду!",
+            parse_mode="HTML"
+        )
     
     await callback.answer(f"✅ Посажено {crop['icon']} {crop['name']}!")
     await show_farm(callback.from_user.id, callback.message)
@@ -164,6 +177,7 @@ async def harvest_all(callback: CallbackQuery):
     # Получаем список созревших культур перед сбором
     plots = await db.get_plots(callback.from_user.id)
     ready_crops = [p['crop_type'] for p in plots if p['status'] == 'ready']
+    ready_count = len(ready_crops)
     
     # Проверяем сезонное событие
     event = await db.get_active_event()
@@ -190,26 +204,46 @@ async def harvest_all(callback: CallbackQuery):
         # Обновляем квесты по каждой культуре
         for crop_type in ready_crops:
             await db.update_quest_progress(callback.from_user.id, 'harvest', 1, crop_type)
-        await db.update_quest_progress(callback.from_user.id, 'harvest', len(ready_crops))
+        await db.update_quest_progress(callback.from_user.id, 'harvest', ready_count)
         
         # Обновляем событие
         if event:
             await db.update_event_score(callback.from_user.id, total_with_bonus)
         
-        # Проверяем достижения
-        new_achievements = await db.check_achievements(callback.from_user.id)
+        # ===== ПРОВЕРКА АЧИВОК (НОВАЯ СИСТЕМА) =====
+        # Проверяем сбор урожая
+        completed_achs = await db.check_and_update_achievements(
+            callback.from_user.id, "harvest", count=ready_count
+        )
+    
+        # Проверяем заработок монет
+        earn_achs = await db.check_and_update_achievements(
+            callback.from_user.id, "earn", count=int(total_with_bonus)
+        )
+        completed_achs.extend(earn_achs)
+    
+        # Проверяем баланс
+        user = await db.get_user(callback.from_user.id)
+        if user:
+            await db.check_and_update_achievements(
+                callback.from_user.id, "balance", count=user['balance']
+            )
+        
+        # Отправляем уведомления о новых ачивках
+        for ach in completed_achs:
+            rewards_text = f"{ach['reward_coins']:,}🪙"
+            if ach['reward_gems'] > 0:
+                rewards_text += f" + {ach['reward_gems']}💎"
+            
+            await callback.message.answer(
+                f"🎉 <b>НОВОЕ ДОСТИЖЕНИЕ!</b>\n\n"
+                f"{ach['icon']} <b>{ach['name']}</b>\n"
+                f"🎁 Награда: {rewards_text}\n\n"
+                f"🏆 <b>Мои ачивки</b> - чтобы забрать награду!",
+                parse_mode="HTML"
+            )
         
         await callback.answer(f"✅ Собрано на {total_with_bonus}🪙{bonus_text}!")
-        
-        # Показываем уведомления о достижениях
-        if new_achievements:
-            for ach in new_achievements:
-                await callback.message.answer(
-                    f"🎉 <b>Новое достижение!</b>\n\n"
-                    f"{ach['icon']} <b>{ach['name']}</b>\n"
-                    f"🎁 Награда: {ach['reward_coins']}🪙",
-                    parse_mode="HTML"
-                )
     else:
         await callback.answer("❌ Нет готовых грядок!")
     
@@ -222,6 +256,28 @@ async def claim_daily(callback: CallbackQuery):
     result = await db.claim_daily_bonus(callback.from_user.id)
     if result:
         bonus = await db.get_daily_bonus(callback.from_user.id)
+        
+        # ===== ПРОВЕРКА АЧИВОК (НОВАЯ СИСТЕМА) =====
+        # Проверяем стрик дней
+        streak = bonus.get('streak', 1)
+        completed_achs = await db.check_and_update_achievements(
+            callback.from_user.id, "streak_days", count=streak
+        )
+    
+        # Отправляем уведомления о новых ачивках
+        for ach in completed_achs:
+            rewards_text = f"{ach['reward_coins']:,}🪙"
+            if ach['reward_gems'] > 0:
+                rewards_text += f" + {ach['reward_gems']}💎"
+            
+            await callback.message.answer(
+                f"🎉 <b>НОВОЕ ДОСТИЖЕНИЕ!</b>\n\n"
+                f"{ach['icon']} <b>{ach['name']}</b>\n"
+                f"🎁 Награда: {rewards_text}\n\n"
+                f"🏆 <b>Мои ачивки</b> - чтобы забрать награду!",
+                parse_mode="HTML"
+            )
+        
         await callback.answer(f"🎁 Бонус получен! +{bonus.get('coins', 50)}🪙")
     else:
         await callback.answer("❌ Бонус уже получен сегодня!", show_alert=True)
@@ -609,34 +665,352 @@ async def claim_quest_reward(callback: CallbackQuery):
         await callback.answer(f"❌ {result['message']}", show_alert=True)
 
 
-# =================== ДОСТИЖЕНИЯ ===================
+# =================== ДОСТИЖЕНИЯ (НОВАЯ СИСТЕМА) ===================
 
 @router.message(F.text == "🏆 Достижения")
 async def achievements_handler(message: Message):
+    """Главное меню достижений"""
     db = await get_db()
-    achievements = await db.get_achievements(message.from_user.id)
+    stats = await db.get_achievement_stats(message.from_user.id)
     
-    if not achievements:
-        await message.answer("❌ Ошибка загрузки достижений!")
-        return
+    # Проверяем невостребованные награды
+    pending = await db.get_pending_rewards(message.from_user.id)
     
-    text_lines = ["🏆 <b>Твои достижения</b>\n"]
+    text_lines = [
+        "🏆 <b>Достижения</b>\n",
+        f"📊 Прогресс: {stats['completed']}/{stats['total']} ачивок"
+    ]
     
-    unlocked_count = sum(1 for a in achievements if a['unlocked'])
-    text_lines.append(f"Разблокировано: {unlocked_count}/{len(achievements)}\n")
+    if stats['total_coins'] > 0 or stats['total_gems'] > 0:
+        rewards_text = f"🏅 Всего наград: {stats['total_coins']:,}🪙"
+        if stats['total_gems'] > 0:
+            rewards_text += f" + {stats['total_gems']}💎"
+        text_lines.append(rewards_text)
+    
+    if pending:
+        text_lines.append(f"\n🎁 <b>Ожидают награды: {len(pending)}</b>")
+    
+    text_lines.append("\n<b>Категории:</b>")
+    
+    # Формируем кнопки категорий
+    category_buttons = []
+    row = []
+    
+    for cat in stats['categories']:
+        cat_text = f"{cat['icon']} {cat['name']} ({cat['completed']}/{cat['total']})"
+        text_lines.append(cat_text)
+        
+        button = InlineKeyboardButton(
+            text=f"{cat['icon']} {cat['name']}",
+            callback_data=f"ach_cat_{cat['id']}"
+        )
+        row.append(button)
+        if len(row) == 2:
+            category_buttons.append(row)
+            row = []
+    
+    if row:
+        category_buttons.append(row)
+    
+    # Добавляем кнопки действий
+    action_buttons = [
+        [InlineKeyboardButton(text="📋 Все достижения", callback_data="ach_all_0")],
+        [InlineKeyboardButton(text="🏅 Лента достижений", callback_data="ach_history")],
+    ]
+    
+    if pending:
+        action_buttons.insert(0, [InlineKeyboardButton(
+            text=f"🎁 Забрать награды ({len(pending)})", 
+            callback_data="ach_claim_all"
+        )])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=category_buttons + action_buttons)
+    
+    await message.answer("\n".join(text_lines), reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("ach_cat_"))
+async def achievements_by_category(callback: CallbackQuery):
+    """Просмотр ачивок по категории"""
+    category_id = callback.data.replace("ach_cat_", "")
+    
+    db = await get_db()
+    achievements = await db.get_achievements_by_category(callback.from_user.id, category_id)
+    categories = await db.get_achievement_categories()
+    
+    cat_info = next((c for c in categories if c['id'] == category_id), None)
+    cat_name = cat_info['name'] if cat_info else category_id
+    cat_icon = cat_info['icon'] if cat_info else '🏆'
+    
+    # Считаем прогресс
+    total = len(achievements)
+    completed = sum(1 for a in achievements if a['completed'])
+    
+    text_lines = [f"{cat_icon} <b>{cat_name}</b>\n", f"Прогресс: {completed}/{total}\n"]
+    
+    keyboard_rows = []
     
     for ach in achievements:
-        status = "✅" if ach['unlocked'] else "🔒"
-        text_lines.append(
-            f"{status} {ach['icon']} <b>{ach['name']}</b>\n"
-            f"   {ach['description']}\n"
-            f"   🎁 Награда: {ach['reward_coins']}🪙"
-        )
-        if ach['reward_multiplier'] > 0:
-            text_lines.append(f"   📈 +x{ach['reward_multiplier']:.1f} множитель")
-        text_lines.append("")
+        if ach.get('is_locked'):
+            # Секретная ачивка
+            text_lines.append(
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🔒 <b>???</b>\n"
+                f"Секретное достижение\n"
+                f"🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥 (???/???)"
+            )
+        else:
+            # Прогресс-бар
+            progress_pct = min(100, (ach['progress'] / ach['requirement_count']) * 100) if ach['requirement_count'] > 0 else 0
+            filled = int(progress_pct / 10)
+            empty = 10 - filled
+            progress_bar = "🟩" * filled + "⬜" * empty
+            
+            # Статус
+            if ach['completed']:
+                if ach['reward_claimed']:
+                    status = "✅"
+                    status_text = "Получена"
+                else:
+                    status = "🎁"
+                    status_text = "Награда доступна!"
+            else:
+                status = "⏳"
+                status_text = f"{ach['progress']:,}/{ach['requirement_count']:,}"
+            
+            text_lines.append(
+                f"━━━━━━━━━━━━━━━━\n"
+                f"{status} <b>{ach['name']}</b>\n"
+                f"{ach['description']}\n"
+                f"{progress_bar}\n"
+                f"{status_text}"
+            )
     
-    await message.answer("\n".join(text_lines), parse_mode="HTML")
+            # Кнопка для забора награды или просмотра
+            if ach['completed'] and not ach['reward_claimed']:
+                keyboard_rows.append([InlineKeyboardButton(
+                    text=f"🎁 Забрать: {ach['name'][:20]}",
+                    callback_data=f"ach_reward_{ach['id']}"
+                )])
+            else:
+                keyboard_rows.append([InlineKeyboardButton(
+                    text=f"ℹ️ {ach['name'][:25]}",
+                    callback_data=f"ach_view_{ach['id']}"
+                )])
+    
+    keyboard_rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_achievements")])
+    
+    await callback.message.edit_text(
+        "\n".join(text_lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "back_achievements")
+async def back_to_achievements(callback: CallbackQuery):
+    """Возврат к главному меню ачивок"""
+    # Симулируем нажатие кнопки достижений
+    from aiogram.types import Message
+    msg = callback.message
+    msg.from_user = callback.from_user
+    await achievements_handler(msg)
+
+
+@router.callback_query(F.data.startswith("ach_view_"))
+async def view_achievement_detail(callback: CallbackQuery):
+    """Детальный просмотр ачивки"""
+    ach_id = int(callback.data.replace("ach_view_", ""))
+    
+    db = await get_db()
+    pa = await db.get_player_achievement(callback.from_user.id, ach_id)
+    
+    if not pa:
+        # Пробуем получить просто инфу об ачивке
+        ach = await db.get_achievement_by_id(ach_id)
+        if not ach:
+            await callback.answer("Ачивка не найдена!")
+            return
+        # Показываем без прогресса
+        pa = {'achievement': ach, 'progress': 0, 'completed': False, 'reward_claimed': False}
+    
+    ach = pa['achievement']
+    
+    # Прогресс-бар
+    progress_pct = min(100, (pa['progress'] / ach['requirement_count']) * 100) if ach['requirement_count'] > 0 else 0
+    filled = int(progress_pct / 10)
+    empty = 10 - filled
+    progress_bar = "🟩" * filled + "⬜" * empty
+    
+    # Награды
+    rewards = []
+    if ach['reward_coins'] > 0:
+        rewards.append(f"• 💰 {ach['reward_coins']:,} монет")
+    if ach['reward_gems'] > 0:
+        rewards.append(f"• 💎 {ach['reward_gems']} кристаллов")
+    for item, qty in ach.get('reward_items', {}).items():
+        rewards.append(f"• 🌱 {item} x{qty}")
+    if ach['reward_multiplier'] > 0:
+        rewards.append(f"• 📈 +x{ach['reward_multiplier']:.1f} множитель")
+    
+    rewards_text = "\n".join(rewards) if rewards else "Нет наград"
+    
+    # Формируем текст
+    text = f"""{ach['icon']} <b>{ach['name']}</b>
+
+📝 {ach['description']}
+
+📊 Прогресс: {pa['progress']:,}/{ach['requirement_count']:,} ({int(progress_pct)}%)
+{progress_bar}
+
+🎁 <b>Награда:</b>
+{rewards_text}"""
+    
+    # Кнопки в зависимости от статуса
+    buttons = []
+    
+    if pa['completed']:
+        if pa['reward_claimed']:
+            text += "\n\n✅ <b>Ачивка получена!</b>"
+            text += f"\n📅 Дата: {pa.get('claimed_at', 'Неизвестно')[:10] if pa.get('claimed_at') else 'Неизвестно'}"
+        else:
+            text += "\n\n🎁 <b>Награда ожидает получения!</b>"
+            buttons.append([InlineKeyboardButton(text="🎁 Забрать награду", callback_data=f"ach_reward_{ach_id}")])
+    else:
+        text += "\n\n⏳ <b>Продолжай выполнять условия!</b>"
+    
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"ach_cat_{ach['category_id']}")])
+    
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("ach_reward_"))
+async def claim_achievement_reward(callback: CallbackQuery):
+    """Получение награды за ачивку"""
+    ach_id = int(callback.data.replace("ach_reward_", ""))
+    
+    db = await get_db()
+    result = await db.claim_achievement_reward(callback.from_user.id, ach_id)
+    
+    if result['success']:
+        rewards_text = "\n".join([f"• {r}" for r in result['rewards']])
+        
+        await callback.message.edit_text(
+            f"🎉 <b>Награда получена!</b>\n\n"
+            f"{result['achievement_icon']} <b>{result['achievement_name']}</b>\n\n"
+            f"🎁 Ты получил:\n{rewards_text}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏆 К ачивкам", callback_data="back_achievements")],
+                [InlineKeyboardButton(text="🌾 На ферму", callback_data="back_farm")],
+            ]),
+            parse_mode="HTML"
+        )
+    else:
+        await callback.answer(f"❌ {result['message']}", show_alert=True)
+
+
+@router.callback_query(F.data == "ach_claim_all")
+async def claim_all_rewards(callback: CallbackQuery):
+    """Забрать все награды"""
+    db = await get_db()
+    pending = await db.get_pending_rewards(callback.from_user.id)
+    
+    if not pending:
+        await callback.answer("Нет доступных наград!")
+        return
+    
+    claimed = []
+    for ach in pending:
+        result = await db.claim_achievement_reward(callback.from_user.id, ach['id'])
+        if result['success']:
+            claimed.append(f"{result['achievement_icon']} {result['achievement_name']}")
+    
+    if claimed:
+        await callback.message.edit_text(
+            f"🎉 <b>Все награды получены!</b>\n\n"
+            f"Забрано ачивок: {len(claimed)}\n\n"
+            f"{chr(10).join(['✅ ' + c for c in claimed])}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏆 К ачивкам", callback_data="back_achievements")],
+            ]),
+            parse_mode="HTML"
+        )
+
+
+@router.callback_query(F.data == "ach_history")
+async def achievement_history(callback: CallbackQuery):
+    """Лента достижений"""
+    db = await get_db()
+    history = await db.get_achievement_history(callback.from_user.id, limit=15)
+    
+    if not history:
+        await callback.answer("История пуста!")
+        return
+    
+    text_lines = ["🏅 <b>Мои достижения</b>\n"]
+    
+    for entry in history:
+        date_str = entry['created_at'][:10] if entry['created_at'] else '???'
+        text_lines.append(f"🎉 {date_str} - {entry['icon']} {entry['name']}")
+    
+    await callback.message.edit_text(
+        "\n".join(text_lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_achievements")],
+        ]),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("ach_all_"))
+async def achievements_all(callback: CallbackQuery):
+    """Список всех ачивок с пагинацией"""
+    page = int(callback.data.replace("ach_all_", ""))
+    per_page = 5
+    
+    db = await get_db()
+    achievements = await db.get_achievements_by_category(callback.from_user.id)
+    
+    # Фильтруем секретные неполученные
+    visible_achievements = [a for a in achievements if not a.get('is_locked')]
+    
+    total_pages = (len(visible_achievements) + per_page - 1) // per_page
+    start = page * per_page
+    end = start + per_page
+    page_achievements = visible_achievements[start:end]
+    
+    if not page_achievements:
+        await callback.answer("Нет ачивок на этой странице!")
+        return
+    
+    text_lines = [f"📋 <b>Все достижения (стр. {page + 1}/{total_pages})</b>\n"]
+    
+    for ach in page_achievements:
+        if ach['completed']:
+            if ach['reward_claimed']:
+                status = "✅"
+            else:
+                status = "🎁"
+        else:
+            progress_pct = int((ach['progress'] / ach['requirement_count']) * 100) if ach['requirement_count'] > 0 else 0
+            status = f"{progress_pct}%"
+        
+        text_lines.append(f"{status} {ach['icon']} {ach['name']}")
+    
+    # Кнопки навигации
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"ach_all_{page-1}"))
+    nav_buttons.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"ach_all_{page+1}"))
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        nav_buttons,
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_achievements")]
+    ])
+    
+    await callback.message.edit_text("\n".join(text_lines), reply_markup=keyboard, parse_mode="HTML")
 
 
 # =================== ASCII ГРАФИКА ===================
