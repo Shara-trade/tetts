@@ -8,12 +8,12 @@ from dotenv import load_dotenv
 import os
 
 from handlers import router as player_router
-from admin_panel import router as admin_router
+from admin_panel_full import router as admin_router
 from achievements_admin import router as achievements_admin_router
 from database import get_database
 
 load_dotenv()
-
+    
 logging.basicConfig(level=logging.INFO)
 
 async def set_commands(bot: Bot):
