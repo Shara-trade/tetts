@@ -22,6 +22,10 @@ class Database:
         self.db_path = db_path
         self.lock = asyncio.Lock()
         self._db = None
+        # Кэш для ролей админов (user_id -> role)
+        self._admin_roles_cache = {}
+        # Кэш для категорий ачивок
+        self._achievement_categories_cache = None
     
     async def connect(self):
         """Установить соединение с базой данных"""
@@ -104,7 +108,17 @@ class Database:
             }
         return None
     
-    async def update_balance(self, user_id: int, amount: int, transaction=True):
+    async def update_balance(self, user_id: int, amount: int, transaction: bool = True) -> Optional[int]:
+        """Обновляет баланс пользователя с проверкой на отрицательный баланс
+
+        Args:
+            user_id: ID пользователя
+            amount: Сумма для добавления (может быть отрицательной)
+            transaction: Использовать транзакцию (по умолчанию True)
+
+        Returns:
+            Новый баланс или None при ошибке
+        """
         async with self.lock:
             db = await self.connect()
             await db.execute("BEGIN")
@@ -113,12 +127,33 @@ class Database:
                 if not user:
                     await db.rollback()
                     return None
-                new_balance = user["balance"] + amount
-                await db.execute("UPDATE users SET balance = ?, last_activity = CURRENT_TIMESTAMP WHERE user_id = ?", (new_balance, user_id))
+                
+                current_balance = user.get("balance", 0)
+                new_balance = current_balance + amount
+                
+                # Проверка на отрицательный баланс
+                if new_balance < 0:
+                    await db.rollback()
+                    logging.warning(f"Insufficient funds for user {user_id}: {current_balance} + {amount} = {new_balance}")
+                    return None
+                
+                await db.execute(
+                    "UPDATE users SET balance = ?, last_activity = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    (new_balance, user_id)
+                )
                 await db.commit()
+
+                # Логирование транзакции
+                action = 'spend' if amount < 0 else 'earn'
+                await self.log_economy(
+                    user_id, action, 'coins', abs(amount), new_balance,
+                    'balance_update', None, f"Balance {'decreased' if amount < 0 else 'increased'} by {abs(amount)}"
+                )
+                
                 return new_balance
-            except:
+            except Exception as e:
                 await db.rollback()
+                logging.error(f"Error updating balance for user {user_id}: {e}")
                 raise
     
     async def update_prestige(self, user_id: int, level: int, multiplier: float):
@@ -126,7 +161,32 @@ class Database:
             "UPDATE users SET prestige_level = ?, prestige_multiplier = ?, city_level = ? WHERE user_id = ?",
             (level, multiplier, level, user_id), commit=True
         )
-    
+
+    async def log_economy(self, user_id: int, action: str, currency: str, amount: int, 
+                          balance_after: int, source: str, item_code: str = None, description: str = None):
+        """Логирует экономические транзакции
+
+        Args:
+            user_id: ID пользователя
+            action: Тип действия (earn, spend, harvest, plant)
+            currency: Валюта (coins, gems)
+            amount: Сумма транзакции
+            balance_after: Баланс после транзакции
+            source: Источник транзакции
+            item_code: Код предмета (опционально)
+            description: Описание (опционально)
+        """
+        try:
+            await self.execute(
+                """INSERT INTO economy_logs 
+                   (user_id, action, currency, amount, balance_after, source, item_code, description, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (user_id, action, currency, amount, balance_after, source, item_code, description),
+                commit=True
+            )
+        except Exception as e:
+            logging.error(f"Error logging economy transaction: {e}")
+
     # Грядки
     async def get_plots(self, user_id: int) -> List[Dict]:
         # Сначала обновим созревшие грядки
@@ -155,7 +215,7 @@ class Database:
                 })
             plots.append(plot)
         return plots
-    
+        
     async def _update_ready_plots(self, user_id: int):
         """Обновляет статус грядок, у которых прошло время роста"""
         await self.execute(
@@ -166,7 +226,7 @@ class Database:
                AND datetime(planted_time, '+' || growth_time_seconds || ' seconds') <= datetime('now')""",
             (user_id,), commit=True
         )
-    
+
     async def plant_crop(self, user_id: int, plot_number: int, crop_type: str, growth_time: int):
         await self.execute(
             """UPDATE plots SET status = 'growing', crop_type = ?, 
@@ -175,26 +235,62 @@ class Database:
             (crop_type, growth_time, user_id, plot_number), commit=True
         )
     
-    async def harvest_plots(self, user_id: int) -> int:
+    async def harvest_plots(self, user_id: int, multiplier: float = None) -> Dict:
+        """Собирает урожай и возвращает информацию о собранном
+
+        Args:
+            user_id: ID пользователя
+            multiplier: Множитель награды (если None, берётся из пользователя)
+
+        Returns:
+            Dict с полями:
+                - success: bool - успешность операции
+                - total: int - общая сумма заработка
+                - harvested_count: int - количество собранных грядок
+                - crops: List[Dict] - список собранных культур
+        """
         async with self.lock:
             db = await self.connect()
             await db.execute("BEGIN")
             try:
                 # Получить готовые грядки и цены
                 async with db.execute(
-                    """SELECT p.plot_number, p.crop_type, s.sell_price 
+                    """SELECT p.plot_number, p.crop_type, s.sell_price, s.item_icon
                        FROM plots p JOIN shop_config s ON p.crop_type = s.item_code 
                        WHERE p.user_id = ? AND p.status = 'ready'""", (user_id,)
                 ) as cursor:
                     rows = await cursor.fetchall()
                 
+                if not rows:
+                    await db.commit()
+                    return {"success": True, "total": 0, "harvested_count": 0, "crops": []}
+
+                # Получаем множитель
+                if multiplier is None:
+                    user = await self.get_user(user_id)
+                    if not user:
+                        await db.rollback()
+                        return {"success": False, "error": "User not found"}
+                    multiplier = user["prestige_multiplier"]
+
+                # Проверяем множитель
+                if multiplier <= 0:
+                    multiplier = 1.0
+
                 total = 0
-                user = await self.get_user(user_id)
-                multiplier = user["prestige_multiplier"]
-                
+                crops = []
                 for row in rows:
-                    total += row[2] * multiplier
-                
+                    plot_num, crop_type, sell_price, icon = row
+                    earned = int(sell_price * multiplier)
+                    total += earned
+                    crops.append({
+                        "plot_number": plot_num,
+                        "crop_type": crop_type,
+                        "sell_price": sell_price,
+                        "earned": earned,
+                        "icon": icon
+                    })
+
                 # Обновить баланс и сбросить грядки
                 await db.execute(
                     "UPDATE users SET balance = balance + ?, total_harvested = total_harvested + ?, last_activity = CURRENT_TIMESTAMP WHERE user_id = ?",
@@ -205,8 +301,14 @@ class Database:
                     (user_id,)
                 )
                 await db.commit()
-                return total
-            except:
+
+                return {
+                    "success": True,
+                    "total": total,
+                    "harvested_count": len(rows),
+                    "crops": crops
+                }
+            except Exception as e:
                 await db.rollback()
                 raise
     
@@ -223,7 +325,7 @@ class Database:
                ON CONFLICT(user_id, item_code) DO UPDATE SET quantity = quantity + excluded.quantity""",
             (user_id, item_code, quantity), commit=True
         )
-        
+
     async def remove_inventory(self, user_id: int, item_code: str, quantity: int):
         await self.execute(
             "UPDATE inventory SET quantity = quantity - ? WHERE user_id = ? AND item_code = ? AND quantity >= ?",
@@ -266,29 +368,66 @@ class Database:
             "items": json.loads(reward[1]) if reward and reward[1] else {}
         }
     
-    async def claim_daily_bonus(self, user_id: int):
+    async def claim_daily_bonus(self, user_id: int) -> Dict:
+        """Выдаёт ежедневный бонус
+
+        Returns:
+            Dict с полями:
+                - success: bool - успешность операции
+                - coins: int - выданные монеты
+                - items: dict - выданные предметы
+        """
         bonus = await self.get_daily_bonus(user_id)
-        if not bonus["available"]:
-            return False
+        if not bonus.get("available", False):
+            return {"success": False, "message": "Бонус недоступен"}
         
-        # Выдать награду
-        await self.update_balance(user_id, bonus["coins"])
-        for item, qty in bonus["items"].items():
-            await self.add_inventory(user_id, item, qty)
+        coins = bonus.get("coins", 0)
+        items = bonus.get("items", {})
         
-        # Обновить прогресс
-        today = datetime.now().date()
-        await self.execute(
-            """INSERT INTO user_daily (user_id, current_streak, last_claim_date) 
-               VALUES (?, ?, ?) 
-               ON CONFLICT(user_id) DO UPDATE SET 
-               current_streak = ?, last_claim_date = ?""",
-            (user_id, bonus["streak"], today, bonus["streak"], today), commit=True
-        )
-        return True
+        # Проверяем что награда существует
+        if coins <= 0 and not items:
+            return {"success": False, "message": "Ошибка конфигурации награды"}
+        
+        try:
+            # Выдать награду
+            if coins > 0:
+                new_balance = await self.update_balance(user_id, coins)
+                if new_balance is None:
+                    return {"success": False, "message": "Ошибка выдачи монет"}
+            
+            items_given = {}
+            for item, qty in items.items():
+                if qty > 0:
+                    await self.add_inventory(user_id, item, qty)
+                    items_given[item] = qty
+            
+            # Обновить прогресс
+            today = datetime.now().date()
+            streak = bonus.get("streak", 1)
+            await self.execute(
+                """INSERT INTO user_daily (user_id, current_streak, last_claim_date) 
+                   VALUES (?, ?, ?) 
+                   ON CONFLICT(user_id) DO UPDATE SET 
+                   current_streak = ?, last_claim_date = ?""",
+                (user_id, streak, today, streak, today), commit=True
+            )
+            
+            return {
+                "success": True,
+                "coins": coins,
+                "items": items_given
+            }
+        except Exception as e:
+            logging.error(f"Error claiming daily bonus for user {user_id}: {e}")
+            return {"success": False, "message": "Ошибка выдачи бонуса"}
     
     # Промокоды
     async def activate_promo(self, user_id: int, code: str) -> Dict:
+        """Активирует промокод для пользователя
+
+        Returns:
+            Dict с информацией о результате активации
+        """
         promo = await self.fetchone(
             "SELECT * FROM promocodes WHERE code = ? AND is_active = 1 AND valid_until > CURRENT_TIMESTAMP AND (max_uses = 0 OR times_used < max_uses)",
             (code.upper(),)
@@ -301,22 +440,51 @@ class Database:
         if exists:
             return {"success": False, "message": "Промокод уже активирован"}
         
-        rewards = json.loads(promo[2])
+        # Проверка валидности JSON наград
+        try:
+            rewards = json.loads(promo[2])
+            if not isinstance(rewards, dict):
+                return {"success": False, "message": "Ошибка конфигурации промокода"}
+        except (json.JSONDecodeError, TypeError):
+            return {"success": False, "message": "Ошибка конфигурации промокода"}
         
-        # Выдать награды
-        await self.update_balance(user_id, rewards.get("coins", 0))
-        for item, qty in rewards.get("items", {}).items():
-            await self.add_inventory(user_id, item, qty)
-        
-        # Обновить счетчик
-        await self.execute(
-            "UPDATE promocodes SET times_used = times_used + 1 WHERE id = ?", (promo[0],), commit=True
-        )
-        await self.execute(
-            "INSERT INTO promo_activations (promo_id, user_id) VALUES (?, ?)", (promo[0], user_id), commit=True
-        )
-        
-        return {"success": True, "rewards": rewards}
+        try:
+            rewards_given = {"coins": 0, "items": {}}
+            
+            # Выдать награды
+            coins = rewards.get("coins", 0)
+            if coins > 0:
+                new_balance = await self.update_balance(user_id, coins)
+                if new_balance is None:
+                    return {"success": False, "message": "Ошибка выдачи награды"}
+                rewards_given["coins"] = coins
+            
+            items = rewards.get("items", {})
+            if isinstance(items, dict):
+                for item, qty in items.items():
+                    if qty > 0:
+                        await self.add_inventory(user_id, item, qty)
+                        rewards_given["items"][item] = qty
+            
+            # Обновить счетчик
+            await self.execute(
+                "UPDATE promocodes SET times_used = times_used + 1 WHERE id = ?", (promo[0],), commit=True
+            )
+            await self.execute(
+                "INSERT INTO promo_activations (promo_id, user_id) VALUES (?, ?)", (promo[0], user_id), commit=True
+            )
+            
+            # Логирование
+            await self.log_economy(
+                user_id, 'earn', 'coins', coins,
+                await self.fetchone("SELECT balance FROM users WHERE user_id = ?", (user_id,))[0] if coins else 0,
+                'promo', code, f"Activated promo code: {code}"
+            )
+            
+            return {"success": True, "rewards": rewards_given}
+        except Exception as e:
+            logging.error(f"Error activating promo {code} for user {user_id}: {e}")
+            return {"success": False, "message": "Ошибка активации промокода"}
     
     async def get_promo_codes(self) -> List[Dict]:
         rows = await self.fetchall("SELECT * FROM promocodes WHERE is_active = 1 AND valid_until > CURRENT_TIMESTAMP")
@@ -422,6 +590,27 @@ class Database:
         
         return completed_quests
     
+    async def update_quest_progress_batch(self, user_id: int, quest_type: str, crops: List[Dict]):
+        """Обновляет прогресс квестов пакетом для нескольких культур
+
+        Args:
+            user_id: ID пользователя
+            quest_type: Тип квеста
+            crops: Список культур с информацией о типе
+        """
+        today = datetime.now().date()
+        
+        # Группируем по типам культур
+        crop_types = {}
+        for crop in crops:
+            crop_type = crop.get('crop_type')
+            if crop_type:
+                crop_types[crop_type] = crop_types.get(crop_type, 0) + 1
+
+        # Обновляем квесты для каждого типа культуры
+        for crop_type, count in crop_types.items():
+            await self.update_quest_progress(user_id, quest_type, count, crop_type)
+
     async def claim_quest_reward(self, user_id: int, quest_id: int) -> Dict:
         """Выдает награду за выполненный квест"""
         today = datetime.now().date()
@@ -433,7 +622,7 @@ class Database:
                WHERE uq.user_id = ? AND uq.quest_id = ? AND uq.assigned_date = ?""",
             (user_id, quest_id, today)
         )
-        
+
         if not row:
             return {"success": False, "message": "Квест не найден"}
         
@@ -464,12 +653,27 @@ class Database:
     
     # ==================== СИСТЕМА ДОСТИЖЕНИЙ (АЧИВОК) ====================
     
-    async def get_achievement_categories(self) -> List[Dict]:
-        """Получает все категории достижений"""
+    async def get_achievement_categories(self, use_cache: bool = True) -> List[Dict]:
+        """Получает все категории достижений с кэшированием
+
+        Args:
+            use_cache: Использовать кэш (по умолчанию True)
+
+        Returns:
+            Список категорий достижений
+        """
+        if use_cache and self._achievement_categories_cache is not None:
+            return self._achievement_categories_cache
+
         rows = await self.fetchall(
             "SELECT category_id, name, icon, description, sort_order FROM achievement_categories ORDER BY sort_order"
         )
-        return [{"id": r[0], "name": r[1], "icon": r[2], "description": r[3], "sort_order": r[4]} for r in rows]
+        categories = [{"id": r[0], "name": r[1], "icon": r[2], "description": r[3], "sort_order": r[4]} for r in rows]
+        
+        if use_cache:
+            self._achievement_categories_cache = categories
+
+        return categories
         
     async def get_achievements_by_category(self, user_id: int, category_id: str = None) -> List[Dict]:
         """Получает достижения по категории с прогрессом игрока"""
@@ -649,7 +853,7 @@ class Database:
                 }
             }
         return None
-    
+        
     async def check_and_update_achievements(self, user_id: int, trigger_type: str, 
                                              count: int = 1, item_code: str = None) -> List[Dict]:
         """Проверяет и обновляет достижения по триггеру"""
@@ -741,7 +945,7 @@ class Database:
                ) AND is_active = 1""",
             (current_ach_id, current_ach_id)
         )
-        
+
         if next_ach:
             # Создаем запись для следующего уровня
             await self.execute(
@@ -938,6 +1142,11 @@ class Database:
         row = await self.fetchone("SELECT last_insert_rowid()")
         return row[0] if row else None
     
+    def clear_cache(self):
+        """Очищает все кэши"""
+        self._admin_roles_cache.clear()
+        self._achievement_categories_cache = None
+    
     async def admin_update_achievement(self, achievement_id: int, data: Dict) -> bool:
         """Обновляет достижение"""
         fields = []
@@ -1129,13 +1338,29 @@ class Database:
         return await self.check_and_update_achievements(user_id, "legacy")
     
     # АДМИНИСТРАТОРЫ
-    async def get_admin_role(self, user_id: int) -> Optional[str]:
-        """Получает роль администратора"""
+    async def get_admin_role(self, user_id: int, use_cache: bool = True) -> Optional[str]:
+        """Получает роль администратора с кэшированием
+
+        Args:
+            user_id: ID пользователя
+            use_cache: Использовать кэш (по умолчанию True)
+
+        Returns:
+            Роль администратора или None
+        """
+        if use_cache and user_id in self._admin_roles_cache:
+            return self._admin_roles_cache[user_id]
+
         row = await self.fetchone(
             "SELECT role FROM admin_roles WHERE user_id = ?",
             (user_id,)
         )
-        return row[0] if row else None
+        role = row[0] if row else None
+
+        if use_cache:
+            self._admin_roles_cache[user_id] = role
+
+        return role
     
     async def is_admin(self, user_id: int) -> bool:
         """Проверяет является ли пользователь админом"""
@@ -1165,6 +1390,9 @@ class Database:
             (target_id, role, admin_id), commit=True
         )
         
+        # Обновляем кэш
+        self._admin_roles_cache[target_id] = role
+
         # Логируем
         await self.log_admin_action(admin_id, f"assign_{role}", target_id, f"Assigned role {role}")
         return True
@@ -1183,6 +1411,10 @@ class Database:
             (target_id,), commit=True
         )
         
+        # Обновляем кэш
+        if target_id in self._admin_roles_cache:
+            del self._admin_roles_cache[target_id]
+
         await self.log_admin_action(admin_id, "remove_role", target_id, "Removed admin role")
         return True
     
