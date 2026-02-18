@@ -559,14 +559,6 @@ async def admin_promo_dates(message: Message, state: FSMContext):
 @router.message(AdminFSM.promo_per_user)
 async def admin_promo_per_user(message: Message, state: FSMContext):
     """Подтверждение создания промо"""
-    try:
-        per_user = int(message.text.strip())
-        if per_user <= 0:
-            per_user = 1
-    except ValueError:
-        per_user = 1
-    
-    await state.update_data(per_user_limit=per_user)
     data = await state.get_data()
     await state.set_state(AdminFSM.promo_confirm)
     
@@ -589,7 +581,6 @@ async def admin_promo_per_user(message: Message, state: FSMContext):
 
 📝 Код: <code>{data['code']}</code>
 🎁 Награда: {reward_text}
-👤 На игрока: {per_user} раз
 {limit_text}
 
 Сохранить промокод?"""
@@ -628,10 +619,10 @@ async def admin_save_promo(callback: CallbackQuery, state: FSMContext):
         
         await db.execute(
             """INSERT INTO promocodes 
-               (code, rewards_json, description, max_uses, valid_until, per_user_limit, is_active)
-               VALUES (?, ?, ?, ?, ?, ?, 1)""",
+               (code, reward_json, description, max_uses, valid_until, is_active)
+               VALUES (?, ?, ?, ?, ?, 1)""",
             (data['code'], json.dumps(rewards), f"Промокод {data['code']}", 
-             max_uses, valid_until, data['per_user_limit']),
+             max_uses, valid_until),
             commit=True
         )
         
@@ -1549,7 +1540,7 @@ async def admin_list_promo(callback: CallbackQuery, state: FSMContext):
     
     db = await get_db()
     promos = await db.fetchall(
-        """SELECT code, rewards_json, max_uses, used_count, valid_until, is_active 
+        """SELECT code, reward_json, max_uses, times_used, valid_until, is_active
            FROM promocodes ORDER BY created_at DESC"""
     )
     
@@ -1566,10 +1557,10 @@ async def admin_list_promo(callback: CallbackQuery, state: FSMContext):
     keyboard_rows = []
     
     for promo in page_promos:
-        code, rewards_json, max_uses, used_count, valid_until, is_active = promo
-        
+        code, reward_json, max_uses, times_used, valid_until, is_active = promo
+
         try:
-            rewards = json.loads(rewards_json) if rewards_json else {}
+            rewards = json.loads(reward_json) if reward_json else {}
             reward_text = []
             if 'coins' in rewards:
                 reward_text.append(f"{rewards['coins']}🪙")
@@ -1581,7 +1572,7 @@ async def admin_list_promo(callback: CallbackQuery, state: FSMContext):
             reward_text = ["?"]
         
         status = "✅" if is_active else "❌"
-        limit_text = f"{used_count}/{max_uses}" if max_uses > 0 else f"{used_count}/∞"
+        limit_text = f"{times_used}/{max_uses}" if max_uses > 0 else f"{times_used}/∞"
         
         text_lines.append(
             f"{status} <code>{code}</code> | {' '.join(reward_text)}\n"
