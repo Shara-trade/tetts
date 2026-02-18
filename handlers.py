@@ -36,41 +36,79 @@ async def start_handler(message: Message):
 async def show_farm(user_id: int, obj: Message | CallbackQuery):
     db = await get_db()
     user = await db.get_user(user_id)
+    
+    # Проверка что пользователь существует
+    if not user:
+        text = "❌ Ошибка: пользователь не найден. Начни с /start"
+        if isinstance(obj, Message):
+            await obj.answer(text)
+        else:
+            await obj.message.edit_text(text)
+        return
+    
     plots = await db.get_plots(user_id)
     
-    # Проверка готовых грядок
-    city_name = "Деревня" if user['city_level'] == 0 else f"Город {user['city_level']}"
+    # Исправлено: правильная проверка для Деревни (city_level == 0)
+    city_name = "Деревня" if user.get('city_level', 0) == 0 else f"Город {user.get('city_level', 0)}"
     text_lines = [
         f"🧑‍🌾 <b>Твоя Ферма ({city_name}):</b>\n",
-        f"Баланс: 🪙 {user['balance']:,}\n",
-        f"Множитель дохода: x{user['prestige_multiplier']:.1f}"
+        f"Баланс: 🪙 {user.get('balance', 0):,}\n",
+        f"Множитель дохода: x{user.get('prestige_multiplier', 1.0):.1f}"
     ]
     
     # Ежедневный бонус
-    bonus = await db.get_daily_bonus(user_id)
-    streak_text = f"Заходишь {bonus['streak']} {'день' if bonus['streak']==1 else 'дня подряд'}. Завтра: +{bonus['coins']} монет."
-    if bonus['available']:
-        text_lines.append(f"\n🎁 <b>Ежедневный бонус:</b> {streak_text}")
-    else:
-        text_lines.append(f"\n🎁 Ежедневный бонус: {bonus.get('message', streak_text)}")
+    try:
+        bonus = await db.get_daily_bonus(user_id)
+        streak = bonus.get('streak', 1) if bonus else 1
+        streak_text = f"Заходишь {streak} {'день' if streak == 1 else 'дня подряд'}. Завтра: +{bonus.get('coins', 50) if bonus else 50} монет."
+        if bonus and bonus.get('available', False):
+            text_lines.append(f"\n🎁 <b>Ежедневный бонус:</b> {streak_text}")
+        else:
+            text_lines.append(f"\n🎁 Ежедневный бонус: {bonus.get('message', streak_text) if bonus else streak_text}")
+    except Exception as e:
+        import logging
+        logging.error(f"Error getting daily bonus: {e}")
+        text_lines.append(f"\n🎁 Ежедневный бонус: ошибка загрузки")
     
     # Грядки
-    for plot in plots:
-        if plot["status"] == "empty":
-            text_lines.append(f"🟫 Грядка #{plot['number']}: Пусто")
-        elif plot["status"] == "growing":
-            minutes = plot["remaining_time"] // 60
-            seconds = plot["remaining_time"] % 60
-            time_str = f"{minutes:02d}:{seconds:02d}"
-            text_lines.append(f"{plot.get('icon', '🌱')} Грядка #{plot['number']}: {plot['crop_type']} (⬆️ Созреет через {time_str})")
-        else:  # ready
-            text_lines.append(f"{plot.get('icon', '✅')} Грядка #{plot['number']}: {plot['crop_type']} (✅ ГОТОВО!)")
+    if not plots:
+        text_lines.append("\n🟫 Пока нет грядок!")
+    else:
+        # Получаем информацию о культурах для иконок
+        crop_icons = {}
+        for plot in plots:
+            if plot.get("crop_type") and plot["crop_type"] not in crop_icons:
+                try:
+                    crop_info = await db.fetchone(
+                        "SELECT item_icon FROM shop_config WHERE item_code = ?",
+                        (plot["crop_type"],)
+                    )
+                    crop_icons[plot["crop_type"]] = crop_info[0] if crop_info and crop_info[0] else '🌱'
+                except Exception:
+                    crop_icons[plot["crop_type"]] = '🌱'
+
+        for plot in plots:
+            plot_number = plot.get('number', '?')
+            if plot.get("status") == "empty":
+                text_lines.append(f"🟫 Грядка #{plot_number}: Пусто")
+            elif plot.get("status") == "growing":
+                icon = crop_icons.get(plot.get("crop_type", ""), "🌱")
+                minutes = plot.get("remaining_time", 0) // 60
+                seconds = plot.get("remaining_time", 0) % 60
+                time_str = f"{minutes:02d}:{seconds:02d}"
+                crop_type = plot.get('crop_type', '???')
+                text_lines.append(f"{icon} Грядка #{plot_number}: {crop_type} (⬆️ Созреет через {time_str})")
+            elif plot.get("status") == "ready":
+                icon = crop_icons.get(plot.get("crop_type", ""), "🌱")
+                crop_type = plot.get('crop_type', '???')
+                text_lines.append(f"{icon} Грядка #{plot_number}: {crop_type} (✅ ГОТОВО!)")
     
-    keyboard = get_farm_keyboard(plots)
+    keyboard = get_farm_keyboard(plots) if plots else None
     
     if isinstance(obj, Message):
         await obj.answer("\n".join(text_lines), reply_markup=get_main_keyboard(), parse_mode="HTML")
-        await obj.answer("Действия:", reply_markup=keyboard)
+        if keyboard:
+            await obj.answer("Действия:", reply_markup=keyboard)
     else:
         await obj.message.edit_text("\n".join(text_lines), reply_markup=keyboard, parse_mode="HTML")
 
@@ -80,22 +118,66 @@ async def farm_handler(message: Message):
 
 @router.callback_query(F.data.startswith("plant_"))
 async def plant_crop(callback: CallbackQuery, state: FSMContext):
-    plot_num = int(callback.data.split("_")[1])
+    try:
+        plot_num = int(callback.data.split("_")[1])
+    except (IndexError, ValueError):
+        await callback.answer("❌ Неверный формат данных!", show_alert=True)
+        return
+    
     db = await get_db()
+    
+    # Проверка что пользователь существует
+    user = await db.get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("❌ Ошибка: пользователь не найден!", show_alert=True)
+        return
+    
+    # Проверка что грядка пустая
+    plots = await db.get_plots(callback.from_user.id)
+    if not plots:
+        await callback.answer("❌ Ошибка: грядки не найдены!", show_alert=True)
+        return
+    
+    plot = next((p for p in plots if p['number'] == plot_num), None)
+    if not plot or plot['status'] != 'empty':
+        await callback.answer("❌ Эта грядка уже занята!", show_alert=True)
+        return
+    
     crops = await db.get_shop_items("seed")
     
-    buttons = []
-    for crop in crops:
-        buttons.append(InlineKeyboardButton(
-            text=f"{crop['icon']} {crop['name']} ({crop['buy_price']}🪙)",
-            callback_data=f"buy_plant_{plot_num}_{crop['item_code']}"
-        ))
+    # Фильтруем доступные по уровню семена
+    user_level = user.get('city_level', 1)
+    available_crops = [c for c in crops if c.get('required_level', 1) <= user_level and c.get('is_active', True)]
     
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        buttons[:2],
-        buttons[2:] if len(buttons) > 2 else [],
-        [InlineKeyboardButton(text="🔙 Назад к грядкам", callback_data="back_farm")]
-    ])
+    if not available_crops:
+        await callback.answer("❌ Нет доступных семян для твоего уровня!", show_alert=True)
+        return
+    
+    buttons = []
+    for crop in available_crops:
+        # Дополнительная проверка что культура активна
+        if crop.get('is_active', True):
+            buttons.append(InlineKeyboardButton(
+                text=f"{crop.get('icon', '🌱')} {crop.get('name', '???')} ({crop.get('buy_price', 0)}🪙)",
+                callback_data=f"buy_plant_{plot_num}_{crop['item_code']}"
+            ))
+    
+    # Проверка что кнопки не пустые перед созданием клавиатуры
+    if not buttons:
+        await callback.answer("❌ Нет доступных семян!", show_alert=True)
+        return
+    
+    # Формируем клавиатуру без пустых строк
+    keyboard_rows = []
+    for i in range(0, len(buttons), 2):
+        row = buttons[i:i+2]
+        if row:  # Добавляем только непустые строки
+            keyboard_rows.append(row)
+    
+    # Добавляем кнопку назад
+    keyboard_rows.append([InlineKeyboardButton(text="🔙 Назад к грядкам", callback_data="back_farm")])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
     
     await callback.message.edit_text(
         f"Выбери культуру для посадки на грядке #{plot_num}:",
@@ -111,60 +193,141 @@ async def back_to_farm(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("buy_plant_"))
 async def buy_plant(callback: CallbackQuery, state: FSMContext):
+    # Парсинг callback_data с обработкой ошибок
     parts = callback.data.split("_")
-    plot_num = int(parts[2])
-    item_code = parts[3]
+    if len(parts) < 4:
+        await callback.answer("❌ Неверный формат данных!", show_alert=True)
+        return
+    
+    try:
+        plot_num = int(parts[2])
+        item_code = parts[3]
+    except (ValueError, IndexError):
+        await callback.answer("❌ Неверный формат данных!", show_alert=True)
+        return
     
     db = await get_db()
+    
     # Получаем данные о культуре из БД
     crops = await db.get_shop_items("seed")
     crop = next((c for c in crops if c["item_code"] == item_code), None)
     
     if not crop:
-        await callback.answer("Ошибка: культура не найдена!")
+        await callback.answer("❌ Ошибка: культура не найдена!", show_alert=True)
+        return
+    
+    # Проверка что культура активна
+    if not crop.get('is_active', True):
+        await callback.answer("❌ Эти семена временно недоступны!", show_alert=True)
         return
     
     user = await db.get_user(callback.from_user.id)
-    if user["balance"] < crop["buy_price"]:
-        await callback.answer(f"❌ Недостаточно монет! Нужно {crop['buy_price']}🪙", show_alert=True)
+    if not user:
+        await callback.answer("❌ Ошибка: пользователь не найден!", show_alert=True)
         return
     
-    # Списываем деньги и сажаем
-    await db.update_balance(callback.from_user.id, -crop["buy_price"])
-    await db.plant_crop(callback.from_user.id, plot_num, item_code, crop["growth_time"])
+    # Проверка баланса
+    buy_price = crop.get('buy_price', 0)
+    if user.get('balance', 0) < buy_price:
+        await callback.answer(f"❌ Недостаточно монет! Нужно {buy_price}🪙", show_alert=True)
+        return
+    
+    # Проверка уровня
+    user_level = user.get('city_level', 1)
+    required_level = crop.get('required_level', 1)
+    if user_level < required_level:
+        await callback.answer(f"❌ Требуется уровень {required_level}!", show_alert=True)
+        return
+    
+    # Проверка что грядка пустая (двойная проверка)
+    plots = await db.get_plots(callback.from_user.id)
+    plot = next((p for p in plots if p['number'] == plot_num), None)
+    if not plot or plot.get('status') != 'empty':
+        await callback.answer("❌ Грядка уже занята!", show_alert=True)
+        return
+    
+    # Транзакционная операция: сначала проверяем баланс, потом списываем и сажаем
+    try:
+        # Проверяем и списываем деньги в одной транзакции
+        new_balance = await db.update_balance(callback.from_user.id, -buy_price)
+        if new_balance is None:
+            await callback.answer("❌ Ошибка списания средств! Попробуй снова.", show_alert=True)
+            return
+        
+        # Сажаем культуру
+        growth_time = crop.get("growth_time", 120)
+        await db.plant_crop(callback.from_user.id, plot_num, item_code, growth_time)
+        
+        # Логирование операции
+        try:
+            await db.log_economy(
+                callback.from_user.id,
+                'spend',
+                'coins',
+                buy_price,
+                new_balance,
+                'plant',
+                item_code,
+                f"Посадка {crop.get('name', item_code)} на грядку #{plot_num}"
+            )
+        except Exception as log_error:
+            import logging
+            logging.error(f"Error logging economy: {log_error}")
+        
+    except Exception as e:
+        # При ошибке пробуем вернуть деньги
+        try:
+            await db.update_balance(callback.from_user.id, buy_price)
+        except:
+            pass
+        import logging
+        logging.error(f"Error in buy_plant: {e}")
+        await callback.answer(f"❌ Ошибка: {str(e)[:80]}!", show_alert=True)
+        return
     
     # Обновляем квесты
-    await db.execute(
-        "UPDATE users SET total_planted = total_planted + 1 WHERE user_id = ?",
-        (callback.from_user.id,), commit=True
-    )
-    await db.update_quest_progress(callback.from_user.id, 'plant', 1)
-    
-    # ===== ПРОВЕРКА АЧИВОК (НОВАЯ СИСТЕМА) =====
-    completed_achs = await db.check_and_update_achievements(
-        callback.from_user.id, "plant", count=1
-    )
-
-    # Проверяем трату монет для финансовых ачивок
-    await db.check_and_update_achievements(
-        callback.from_user.id, "spend", count=crop["buy_price"]
-    )
-
-    # Отправляем уведомления о новых ачивках
-    for ach in completed_achs:
-        rewards_text = f"{ach['reward_coins']:,}🪙"
-        if ach['reward_gems'] > 0:
-            rewards_text += f" + {ach['reward_gems']}💎"
-        
-        await callback.message.answer(
-            f"🎉 <b>НОВОЕ ДОСТИЖЕНИЕ!</b>\n\n"
-            f"{ach['icon']} <b>{ach['name']}</b>\n"
-            f"🎁 Награда: {rewards_text}\n\n"
-            f"🏆 <b>Мои ачивки</b> - чтобы забрать награду!",
-            parse_mode="HTML"
+    try:
+        await db.execute(
+            "UPDATE users SET total_planted = total_planted + 1 WHERE user_id = ?",
+            (callback.from_user.id,), commit=True
         )
+        await db.update_quest_progress(callback.from_user.id, 'plant', 1)
+    except Exception as e:
+        import logging
+        logging.error(f"Error updating quests: {e}")
+
+    # ===== ПРОВЕРКА АЧИВОК =====
+    try:
+        completed_achs = await db.check_and_update_achievements(
+            callback.from_user.id, "plant", count=1
+        )
+
+        # Проверяем трату монет для финансовых ачивок
+        spend_achs = await db.check_and_update_achievements(
+            callback.from_user.id, "spend", count=buy_price
+        )
+        completed_achs.extend(spend_achs)
+
+        # Отправляем уведомления о новых ачивках
+        for ach in completed_achs:
+            rewards_text = f"{ach.get('reward_coins', 0):,}🪙"
+            if ach.get('reward_gems', 0) > 0:
+                rewards_text += f" + {ach['reward_gems']}💎"
+            
+            await callback.message.answer(
+                f"🎉 <b>НОВОЕ ДОСТИЖЕНИЕ!</b>\n\n"
+                f"{ach.get('icon', '🏆')} <b>{ach.get('name', '???')}</b>\n"
+                f"🎁 Награда: {rewards_text}\n\n"
+                f"🏆 <b>Мои ачивки</b> - чтобы забрать награду!",
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        import logging
+        logging.error(f"Error checking achievements: {e}")
     
-    await callback.answer(f"✅ Посажено {crop['icon']} {crop['name']}!")
+    crop_icon = crop.get('icon', '🌱')
+    crop_name = crop.get('name', item_code)
+    await callback.answer(f"✅ Посажено {crop_icon} {crop_name}!")
     await show_farm(callback.from_user.id, callback.message)
     await state.clear()
 
@@ -174,113 +337,177 @@ async def buy_plant(callback: CallbackQuery, state: FSMContext):
 async def harvest_all(callback: CallbackQuery):
     db = await get_db()
     
-    # Получаем список созревших культур перед сбором
-    plots = await db.get_plots(callback.from_user.id)
-    ready_crops = [p['crop_type'] for p in plots if p['status'] == 'ready']
-    ready_count = len(ready_crops)
+    # Получаем данные в одной транзакции
+    user = await db.get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("❌ Ошибка: пользователь не найден!", show_alert=True)
+        return
     
     # Проверяем сезонное событие
     event = await db.get_active_event()
-    multiplier = event['multiplier'] if event else 1.0
+    multiplier = 1.0
     
-    total = await db.harvest_plots(callback.from_user.id)
+    if event and event.get('is_active', False):
+        multiplier = event.get('multiplier', 1.0)
+        if multiplier <= 0 or multiplier > 10:  # Защита от некорректных значений
+            multiplier = 1.0
     
-    if total > 0:
-        # Учитываем множитель события
-        if event:
-            bonus = int(total * (multiplier - 1))
-            total_with_bonus = int(total * multiplier)
+    # Собираем урожай (внутри происходит сбор и возврат информации)
+    result = await db.harvest_plots(callback.from_user.id, multiplier)
+    
+    if not result or not result.get('success', False):
+        await callback.answer("❌ Нет готовых грядок!")
+        await show_farm(callback.from_user.id, callback.message)
+        return
+    
+    total = result.get('total', 0)
+    ready_count = result.get('harvested_count', 0)
+    ready_crops = result.get('crops', [])
+    
+    if total <= 0 or ready_count <= 0:
+        await callback.answer("❌ Нет готовых грядок!")
+        await show_farm(callback.from_user.id, callback.message)
+        return
+    
+    # Проверяем что ready_count совпадает с количеством культур
+    if len(ready_crops) != ready_count:
+        import logging
+        logging.warning(f"Mismatch: ready_crops count {len(ready_crops)} != ready_count {ready_count}")
+    
+    # Формируем текст бонуса
+    bonus_text = ""
+    if event and multiplier > 1.0:
+        bonus = int(total - (total / multiplier))
+        if bonus > 0:
             bonus_text = f" (включая бонус события +{bonus}🪙)"
-        else:
-            total_with_bonus = int(total)
-            bonus_text = ""
-        
-        # Обновляем статистику
-        await db.execute(
-            "UPDATE users SET total_earned = total_earned + ? WHERE user_id = ?",
-            (total_with_bonus, callback.from_user.id), commit=True
-        )
     
-        # Обновляем квесты по каждой культуре
-        for crop_type in ready_crops:
-            await db.update_quest_progress(callback.from_user.id, 'harvest', 1, crop_type)
-        await db.update_quest_progress(callback.from_user.id, 'harvest', ready_count)
-        
+    # Обновляем квесты (объединённый вызов с пакетной обработкой)
+    try:
+        if ready_crops:
+            # Используем пакетное обновление квестов
+            await db.update_quest_progress_batch(
+                callback.from_user.id, 
+                'harvest', 
+                ready_crops
+            )
+            # Обновляем общий квест
+            await db.update_quest_progress(callback.from_user.id, 'harvest', ready_count)
+
         # Обновляем событие
-        if event:
-            await db.update_event_score(callback.from_user.id, total_with_bonus)
-        
-        # ===== ПРОВЕРКА АЧИВОК (НОВАЯ СИСТЕМА) =====
-        # Проверяем сбор урожая
-        completed_achs = await db.check_and_update_achievements(
+        if event and event.get('is_active', False):
+            try:
+                await db.update_event_score(callback.from_user.id, total)
+            except Exception as e:
+                import logging
+                logging.error(f"Error updating event score: {e}")
+    except Exception as e:
+        import logging
+        logging.error(f"Error updating quests: {e}")
+    
+    # ===== ПРОВЕРКА АЧИВОК =====
+    completed_achs = []
+    try:
+        harvest_achs = await db.check_and_update_achievements(
             callback.from_user.id, "harvest", count=ready_count
         )
-    
+        completed_achs.extend(harvest_achs)
+        
         # Проверяем заработок монет
         earn_achs = await db.check_and_update_achievements(
-            callback.from_user.id, "earn", count=int(total_with_bonus)
+            callback.from_user.id, "earn", count=total
         )
         completed_achs.extend(earn_achs)
-    
-        # Проверяем баланс
-        user = await db.get_user(callback.from_user.id)
-        if user:
-            await db.check_and_update_achievements(
-                callback.from_user.id, "balance", count=user['balance']
-            )
         
         # Отправляем уведомления о новых ачивках
         for ach in completed_achs:
-            rewards_text = f"{ach['reward_coins']:,}🪙"
-            if ach['reward_gems'] > 0:
+            rewards_text = f"{ach.get('reward_coins', 0):,}🪙"
+            if ach.get('reward_gems', 0) > 0:
                 rewards_text += f" + {ach['reward_gems']}💎"
             
             await callback.message.answer(
                 f"🎉 <b>НОВОЕ ДОСТИЖЕНИЕ!</b>\n\n"
-                f"{ach['icon']} <b>{ach['name']}</b>\n"
+                f"{ach.get('icon', '🏆')} <b>{ach.get('name', '???')}</b>\n"
                 f"🎁 Награда: {rewards_text}\n\n"
                 f"🏆 <b>Мои ачивки</b> - чтобы забрать награду!",
                 parse_mode="HTML"
             )
-        
-        await callback.answer(f"✅ Собрано на {total_with_bonus}🪙{bonus_text}!")
-    else:
-        await callback.answer("❌ Нет готовых грядок!")
+    except Exception as e:
+        import logging
+        logging.error(f"Error checking achievements: {e}")
     
+    await callback.answer(f"✅ Собрано {ready_count} грядок на {total}🪙{bonus_text}!")
     await show_farm(callback.from_user.id, callback.message)
 
 # Ежедневный бонус
 @router.callback_query(F.data == "claim_daily")
 async def claim_daily(callback: CallbackQuery):
     db = await get_db()
+    
+    # Получаем информацию о бонусе до получения (кэшируем)
+    bonus_info = await db.get_daily_bonus(callback.from_user.id)
+    
+    # Проверяем что bonus_info валиден
+    if not bonus_info:
+        await callback.answer("❌ Ошибка загрузки бонуса!", show_alert=True)
+        await show_farm(callback.from_user.id, callback.message)
+        return
+    
+    if not bonus_info.get('available', False):
+        await callback.answer("❌ Бонус уже получен сегодня!", show_alert=True)
+        await show_farm(callback.from_user.id, callback.message)
+        return
+    
+    # Получаем бонус
     result = await db.claim_daily_bonus(callback.from_user.id)
-    if result:
-        bonus = await db.get_daily_bonus(callback.from_user.id)
-        
-        # ===== ПРОВЕРКА АЧИВОК (НОВАЯ СИСТЕМА) =====
-        # Проверяем стрик дней
-        streak = bonus.get('streak', 1)
+    
+    if not result or not result.get('success', False):
+        await callback.answer("❌ Ошибка получения бонуса!", show_alert=True)
+        await show_farm(callback.from_user.id, callback.message)
+        return
+    
+    # Используем кэшированные данные о бонусе
+    streak = bonus_info.get('streak', 1)
+    if streak is None:
+        streak = 1
+    
+    coins = result.get('coins', 0)
+    items = result.get('items', {})
+    
+    # Проверяем что награда действительно выдана
+    if coins <= 0 and not items:
+        await callback.answer("❌ Ошибка: награда не выдана!", show_alert=True)
+        return
+    
+    # ===== ПРОВЕРКА АЧИВОК =====
+    try:
         completed_achs = await db.check_and_update_achievements(
             callback.from_user.id, "streak_days", count=streak
         )
-    
+        
         # Отправляем уведомления о новых ачивках
         for ach in completed_achs:
-            rewards_text = f"{ach['reward_coins']:,}🪙"
-            if ach['reward_gems'] > 0:
+            rewards_text = f"{ach.get('reward_coins', 0):,}🪙"
+            if ach.get('reward_gems', 0) > 0:
                 rewards_text += f" + {ach['reward_gems']}💎"
             
             await callback.message.answer(
                 f"🎉 <b>НОВОЕ ДОСТИЖЕНИЕ!</b>\n\n"
-                f"{ach['icon']} <b>{ach['name']}</b>\n"
+                f"{ach.get('icon', '🏆')} <b>{ach.get('name', '???')}</b>\n"
                 f"🎁 Награда: {rewards_text}\n\n"
                 f"🏆 <b>Мои ачивки</b> - чтобы забрать награду!",
                 parse_mode="HTML"
             )
-        
-        await callback.answer(f"🎁 Бонус получен! +{bonus.get('coins', 50)}🪙")
-    else:
-        await callback.answer("❌ Бонус уже получен сегодня!", show_alert=True)
+    except Exception as e:
+        import logging
+        logging.error(f"Error checking achievements: {e}")
+    
+    # Формируем текст награды
+    reward_text = f"{coins}🪙"
+    if items:
+        for item, qty in items.items():
+            reward_text += f", {item} x{qty}"
+    
+    await callback.answer(f"🎁 Бонус получен! +{reward_text}")
     await show_farm(callback.from_user.id, callback.message)
 
 # Обновление фермы
@@ -299,18 +526,47 @@ async def shop_handler(message: Message):
     
     text = "🏪 <b>Магазин</b>\n\nВыбери категорию:"
     
-    if event:
-        from datetime import datetime
-        time_left = event['end_date'] - datetime.now()
-        hours_left = int(time_left.total_seconds() // 3600)
-        
-        text = (
-            f"🏪 <b>Магазин</b>\n\n"
-            f"🎉 <b>{event['name']}</b> активно!\n"
-            f"💰 x{event['multiplier']} награды за урожай!\n"
-            f"⏰ Осталось: {hours_left} часов\n\n"
-            f"Выбери категорию:"
-        )
+    if event and event.get('is_active', False):
+        try:
+            from datetime import datetime, timezone
+            end_date = event.get('end_date')
+            
+            if end_date:
+                # Обработка разных форматов даты
+                if isinstance(end_date, str):
+                    try:
+                        # Пробуем разные форматы
+                        if 'T' in end_date:
+                            end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                        else:
+                            end_date = datetime.strptime(end_date, '%Y-%m-%d %H:%M:%S')
+                    except (ValueError, AttributeError):
+                        end_date = None
+                
+                if end_date:
+                    # Убеждаемся что datetime имеет timezone
+                    if end_date.tzinfo is None:
+                        now = datetime.now()
+                    else:
+                        now = datetime.now(end_date.tzinfo)
+                    
+                    time_left = end_date - now
+                    hours_left = int(time_left.total_seconds() // 3600)
+                    
+                    # Защита от отрицательных значений
+                    if hours_left > 0:
+                        multiplier = event.get('multiplier', 1.0)
+                        event_name = event.get('name', 'Событие')
+                        text = (
+                            f"🏪 <b>Магазин</b>\n\n"
+                            f"🎉 <b>{event_name}</b> активно!\n"
+                            f"💰 x{multiplier:.1f} награды за урожай!\n"
+                            f"⏰ Осталось: {hours_left} часов\n\n"
+                            f"Выбери категорию:"
+                        )
+        except Exception as e:
+            import logging
+            logging.warning(f"Error parsing event date: {e}")
     
     await message.answer(
         text,
@@ -321,6 +577,13 @@ async def shop_handler(message: Message):
 @router.callback_query(F.data.startswith("shop_"))
 async def shop_category(callback: CallbackQuery):
     category = callback.data.replace("shop_", "")
+
+    # Валидация категории
+    valid_categories = ['seed', 'boost', 'decor', 'tool']
+    if category not in valid_categories:
+        await callback.answer("❌ Неверная категория!")
+        return
+    
     db = await get_db()
     
     # Получаем обычные товары
@@ -328,44 +591,60 @@ async def shop_category(callback: CallbackQuery):
     
     # Добавляем сезонные товары если есть событие
     event = await db.get_active_event()
-    if event and category == 'seed':
-        seasonal_items = await db.fetchall(
-            """SELECT * FROM shop_config 
-               WHERE category = ? AND is_seasonal = 1 AND season = ?""",
-            (category, event['season'])
-        )
-        # Преобразуем в тот же формат
-        for row in seasonal_items:
-            items.append({
-                "item_code": row[0],
-                "name": row[1],
-                "icon": row[2],
-                "buy_price": row[3],
-                "sell_price": row[4],
-                "growth_time": row[5],
-                "category": row[6],
-                "is_seasonal": True
-            })
+    multiplier = 1.0
+    
+    if event and event.get('is_active', False) and category == 'seed':
+        try:
+            seasonal_items = await db.fetchall(
+                """SELECT item_code, item_name, item_icon, buy_price, sell_price, growth_time 
+                   FROM shop_config 
+                   WHERE category = ? AND is_seasonal = 1 AND season = ?""",
+                (category, event.get('season', 'summer'))
+            )
+            # Преобразуем в тот же формат (row - tuple, индексы 0-5)
+            for row in seasonal_items:
+                items.append({
+                    "item_code": row[0],
+                    "name": row[1],
+                    "icon": row[2],
+                    "buy_price": row[3],
+                    "sell_price": row[4],
+                    "growth_time": row[5],
+                    "category": category,
+                    "is_seasonal": True
+                })
+            multiplier = event.get('multiplier', 1.0)
+        except Exception as e:
+            import logging
+            logging.error(f"Error loading seasonal items: {e}")
     
     if not items:
-        await callback.answer("Категория пуста!")
+        await callback.answer("📭 Категория пуста!")
         return
     
     text_lines = [f"🏪 <b>{category.capitalize()}</b>\n"]
     
-    if event and category == 'seed':
-        text_lines.append(f"🎉 {event['name']} - x{event['multiplier']} награды!\n")
+    if event and event.get('is_active', False) and category == 'seed':
+        text_lines.append(f"🎉 {event.get('name', 'Событие')} - x{multiplier} награды!\n")
     
     for item in items:
         seasonal_mark = "🌟 " if item.get('is_seasonal') else ""
-        text_lines.append(f"{seasonal_mark}{item['icon']} <b>{item['name']}</b>")
-        if item['buy_price'] > 0:
-            text_lines.append(f"   💰 Покупка: {item['buy_price']}🪙")
-        if item['sell_price'] > 0:
-            sell_price = int(item['sell_price'] * event['multiplier']) if event else item['sell_price']
-            text_lines.append(f"   💵 Продажа: {sell_price}🪙")
-        if item['growth_time'] > 0:
-            minutes = item['growth_time'] // 60
+        icon = item.get('icon', '🌱')
+        name = item.get('name', '???')
+        text_lines.append(f"{seasonal_mark}{icon} <b>{name}</b>")
+        
+        buy_price = item.get('buy_price', 0)
+        if buy_price > 0:
+            text_lines.append(f"   💰 Покупка: {buy_price}🪙")
+        
+        sell_price = item.get('sell_price', 0)
+        if sell_price > 0:
+            final_sell_price = int(sell_price * multiplier) if multiplier > 1.0 else sell_price
+            text_lines.append(f"   💵 Продажа: {final_sell_price}🪙")
+        
+        growth_time = item.get('growth_time', 0)
+        if growth_time > 0:
+            minutes = growth_time // 60
             text_lines.append(f"   ⏱️ Рост: {minutes} мин")
         text_lines.append("")
     
@@ -402,10 +681,77 @@ async def inventory_handler(message: Message):
         await message.answer("📦 <b>Твой Амбар</b>\n\nПусто! Купи семена в магазине.", parse_mode="HTML")
         return
     
-    text_lines = ["📦 <b>Твой Амбар</b>\n"]
+    # Получаем информацию о предметах из магазина
+    all_items = await db.get_shop_items()
+
+    # Создаем словарь с информацией о предметах
+    items_info = {item['item_code']: item for item in all_items}
+
+    # Разделяем по категориям
+    seeds = {}
+    fertilizers = {}
+    upgrades = {}
+    other = {}
+
+    total_value = 0
+
     for item_code, quantity in inventory.items():
-        text_lines.append(f"• {item_code}: {quantity} шт.")
-    
+        if quantity <= 0:
+            continue
+
+        item = items_info.get(item_code, {})
+        category = item.get('category', 'other')
+        icon = item.get('icon', '📦')
+        name = item.get('name', item_code)
+        sell_price = item.get('sell_price', 0)
+
+        # Вычисляем стоимость
+        item_value = sell_price * quantity
+        total_value += item_value
+
+        item_entry = {
+            'name': name,
+            'icon': icon,
+            'quantity': quantity,
+            'value': item_value
+        }
+
+        if category == 'seed':
+            seeds[item_code] = item_entry
+        elif category == 'fertilizer':
+            fertilizers[item_code] = item_entry
+        elif category == 'upgrade':
+            upgrades[item_code] = item_entry
+        else:
+            other[item_code] = item_entry
+
+    # Формируем текст
+    text_lines = [f"📦 <b>Твой Амбар</b>\n"]
+    text_lines.append(f"💰 Общая стоимость: {total_value:,}🪙\n")
+
+    if seeds:
+        text_lines.append("🌱 <b>Семена:</b>")
+        for item_code, item in seeds.items():
+            text_lines.append(f"   {item['icon']} {item['name']}: {item['quantity']} шт. (~{item['value']:,}🪙)")
+        text_lines.append("")
+
+    if fertilizers:
+        text_lines.append("🧪 <b>Удобрения:</b>")
+        for item_code, item in fertilizers.items():
+            text_lines.append(f"   {item['icon']} {item['name']}: {item['quantity']} шт. (~{item['value']:,}🪙)")
+        text_lines.append("")
+
+    if upgrades:
+        text_lines.append("🚜 <b>Улучшения:</b>")
+        for item_code, item in upgrades.items():
+            text_lines.append(f"   {item['icon']} {item['name']}: {item['quantity']} шт.")
+        text_lines.append("")
+
+    if other:
+        text_lines.append("📦 <b>Другое:</b>")
+        for item_code, item in other.items():
+            text_lines.append(f"   {item['icon']} {item['name']}: {item['quantity']} шт.")
+
     await message.answer("\n".join(text_lines), parse_mode="HTML")
 
 # Престиж
@@ -414,14 +760,70 @@ async def prestige_handler(message: Message):
     db = await get_db()
     user = await db.get_user(message.from_user.id)
     
+    # Требования для уровней престижа
+    prestige_requirements = {
+        1: (0, 1.0, "Новичок"),
+        2: (100, 1.1, "Фермер"),
+        3: (300, 1.2, "Опытный фермер"),
+        4: (600, 1.4, "Мастер"),
+        5: (1000, 1.6, "Эксперт"),
+        6: (1500, 1.8, "Легенда"),
+        7: (2500, 2.0, "Великий фермер"),
+        8: (4000, 2.3, "Грандмастер"),
+        9: (6000, 2.6, "Фермер-бог"),
+        10: (10000, 3.0, "Божественный фермер")
+    }
+
+    current_level = user['prestige_level']
+    current_harvested = user['total_harvested']
+
+    # Определяем следующий уровень
+    next_level = current_level + 1
+    if next_level in prestige_requirements:
+        next_harvest, next_multiplier, next_title = prestige_requirements[next_level]
+        remaining = next_harvest - current_harvested
+        progress_pct = min(100, (current_harvested / next_harvest) * 100)
+
+        # Прогресс-бар
+        filled = int(progress_pct / 10)
+        empty = 10 - filled
+        progress_bar = "█" * filled + "░" * empty
+        
+        next_level_text = (
+            f"\n📈 <b>Следующий уровень: {next_level} - {next_title}</b>\n"
+            f"   {progress_bar} {int(progress_pct)}%\n"
+            f"   Осталось собрать: {remaining:,} урожая\n"
+            f"   Новый множитель: x{next_multiplier:.1f}"
+        )
+    else:
+        next_level_text = "\n🎉 <b>Ты достиг максимального уровня престижа!</b>"
+
+    # Текущий уровень
+    if current_level in prestige_requirements:
+        _, _, current_title = prestige_requirements[current_level]
+    else:
+        current_title = "Неизвестный"
+
     text = (
         f"🚜 <b>Система Престижа</b>\n\n"
-        f"Текущий уровень: {user['prestige_level']}\n"
-        f"Множитель дохода: x{user['prestige_multiplier']:.1f}\n\n"
-        f"Собрано урожая: {user['total_harvested']}\n\n"
-        f"Для повышения престижа нужно собрать больше урожая!"
+        f"🏆 <b>Текущий уровень: {current_level} - {current_title}</b>\n"
+        f"📊 Множитель дохода: x{user['prestige_multiplier']:.1f}\n"
+        f"🌾 Собрано урожая: {user['total_harvested']:,}\n"
+        f"{next_level_text}\n\n"
+        f"💡 <b>Уровни престижа:</b>\n"
     )
-    
+
+    # Показываем таблицу уровней
+    for level, (harvest, multiplier, title) in prestige_requirements.items():
+        if level <= current_level:
+            status = "✅"
+        elif level == next_level:
+            status = "🎯"
+        else:
+            status = "🔒"
+
+        text += f"{status} Ур.{level} - {title}: x{multiplier:.1f} ({harvest:,})\n"
+
     await message.answer(text, parse_mode="HTML")
 
 # Команда помощи
@@ -458,6 +860,11 @@ async def help_handler(message: Message):
 Удачной игры! 🌾"""
     
     await message.answer(help_text, parse_mode="HTML", reply_markup=get_main_keyboard())
+
+# Кнопка помощи
+@router.message(F.text == "❓ Помощь")
+async def help_button_handler(message: Message):
+    await help_handler(message)
 
 # Команда статистики
 @router.message(Command("stats"))
@@ -501,17 +908,45 @@ async def promo_handler(message: Message):
         return
     
     code = args[1].upper()
+    
+    # Валидация формата промокода
+    if len(code) < 4 or len(code) > 20:
+        await message.answer(
+            "❌ <b>Неверный формат промокода!</b>\n\n"
+            "Промокод должен содержать от 4 до 20 символов.",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Проверка на допустимые символы (только буквы и цифры)
+    if not code.replace('-', '').replace('_', '').isalnum():
+        await message.answer(
+            "❌ <b>Неверный формат промокода!</b>\n\n"
+            "Промокод может содержать только буквы, цифры, дефис и нижнее подчеркивание.",
+            parse_mode="HTML"
+        )
+        return
+    
     db = await get_db()
     
     result = await db.activate_promo(message.from_user.id, code)
     
-    if result['success']:
+    if result.get('success', False):
+        rewards = result.get('rewards', {})
         rewards_text = ""
-        if 'coins' in result['rewards']:
-            rewards_text += f"💰 {result['rewards']['coins']} монет\n"
-        if 'items' in result['rewards']:
-            for item, qty in result['rewards']['items'].items():
-                rewards_text += f"📦 {item}: {qty} шт.\n"
+        
+        if 'coins' in rewards:
+            coins = rewards['coins']
+            if isinstance(coins, (int, float)) and coins > 0:
+                rewards_text += f"💰 {int(coins)} монет\n"
+        
+        if 'items' in rewards and isinstance(rewards['items'], dict):
+            for item, qty in rewards['items'].items():
+                if isinstance(qty, int) and qty > 0:
+                    rewards_text += f"📦 {item}: {qty} шт.\n"
+        
+        if not rewards_text:
+            rewards_text = "Нет наград\n"
         
         await message.answer(
             f"✅ <b>Промокод активирован!</b>\n\n"
@@ -519,11 +954,12 @@ async def promo_handler(message: Message):
             parse_mode="HTML"
         )
     else:
+        error_message = result.get('message', 'Неизвестная ошибка')
         await message.answer(
-            f"❌ {result['message']}",
+            f"❌ {error_message}",
             parse_mode="HTML"
         )
-
+    
 # Топ игроков
 @router.message(Command("top"))
 async def top_handler(message: Message):
@@ -552,47 +988,104 @@ async def top_handler(message: Message):
     # Показываем место пользователя
     user = await db.get_user(message.from_user.id)
     if user:
-        user_rank = await db.fetchone(
-            """SELECT COUNT(*) + 1 FROM users 
-               WHERE balance > ? AND is_banned = 0""",
-            (user['balance'],)
-        )
-        if user_rank:
-            text_lines.append(f"\n📍 Ты на {user_rank[0]} месте с {user['balance']:,}🪙")
+        try:
+            user_rank = await db.fetchone(
+                """SELECT COUNT(*) + 1 FROM users 
+                   WHERE balance > ? AND is_banned = 0""",
+                (user.get('balance', 0),)
+            )
+            if user_rank and user_rank[0]:
+                text_lines.append(f"\n📍 Ты на {user_rank[0]} месте с {user.get('balance', 0):,}🪙")
+        except Exception as e:
+            import logging
+            logging.error(f"Error getting user rank: {e}")
     
     await message.answer("\n".join(text_lines), parse_mode="HTML", reply_markup=get_main_keyboard())
 
 # Использование удобрений (ускорение роста)
 @router.callback_query(F.data.startswith("fertilize_"))
 async def fertilize_plot(callback: CallbackQuery):
-    plot_num = int(callback.data.split("_")[1])
+    try:
+        plot_num = int(callback.data.split("_")[1])
+    except (IndexError, ValueError):
+        await callback.answer("❌ Неверный формат данных!", show_alert=True)
+        return
+    
     db = await get_db()
     
     # Проверяем есть ли удобрения в инвентаре
     inventory = await db.get_inventory(callback.from_user.id)
-    if 'fertilizer' not in inventory or inventory['fertilizer'] <= 0:
+    if not inventory or inventory.get('fertilizer', 0) <= 0:
         await callback.answer("❌ У тебя нет удобрений! Купи в магазине.", show_alert=True)
         return
     
     # Получаем информацию о грядке
     plots = await db.get_plots(callback.from_user.id)
+    if not plots:
+        await callback.answer("❌ Ошибка загрузки грядок!", show_alert=True)
+        return
+    
     plot = next((p for p in plots if p['number'] == plot_num), None)
     
-    if not plot or plot['status'] != 'growing':
+    if not plot:
+        await callback.answer("❌ Грядка не найдена!", show_alert=True)
+        return
+    
+    if plot.get('status') != 'growing':
         await callback.answer("❌ На этой грядке ничего не растёт!", show_alert=True)
         return
     
-    # Ускоряем рост на 50%
-    await db.execute(
-        """UPDATE plots SET planted_time = datetime(planted_time, '-30 seconds') 
-           WHERE user_id = ? AND plot_number = ?""",
-        (callback.from_user.id, plot_num), commit=True
-    )
+    # Проверяем что удобрение ещё не применено
+    if plot.get('fertilized', False):
+        await callback.answer("❌ На эту грядку уже применено удобрение!", show_alert=True)
+        return
     
-    # Уменьшаем количество удобрений
-    await db.remove_inventory(callback.from_user.id, 'fertilizer', 1)
+    # Ускоряем рост на 50% от оставшегося времени (минимум 30 секунд)
+    remaining_time = plot.get('remaining_time', 0)
+    if remaining_time <= 0:
+        await callback.answer("❌ Растение уже созрело!", show_alert=True)
+        return
     
-    await callback.answer("⚡ Удобрение применено! Рост ускорен на 30 секунд!")
+    # Ускорение: 50% от оставшегося времени, минимум 30 секунд, максимум 300 секунд
+    acceleration = max(30, min(300, int(remaining_time * 0.5)))
+
+    try:
+        # Применяем ускорение и помечаем как удобренную
+        await db.execute(
+            """UPDATE plots
+               SET planted_time = datetime(planted_time, '-{} seconds'),
+                   fertilized = 1
+               WHERE user_id = ? AND plot_number = ?""".format(acceleration),
+            (callback.from_user.id, plot_num), commit=True
+        )
+
+        # Уменьшаем количество удобрений
+        await db.remove_inventory(callback.from_user.id, 'fertilizer', 1)
+
+        # Получаем новое время созревания
+        new_plots = await db.get_plots(callback.from_user.id)
+        new_plot = next((p for p in new_plots if p['number'] == plot_num), None)
+        new_remaining = new_plot.get('remaining_time', 0) if new_plot else 0
+        
+        # Проверяем что грядка всё ещё растёт
+        if new_plot and new_plot.get('status') == 'growing':
+            minutes = new_remaining // 60
+            seconds = new_remaining % 60
+            await callback.answer(
+                f"⚡ Удобрение применено! Рост ускорен на {acceleration} сек. "
+                f"Осталось: {minutes:02d}:{seconds:02d}"
+            )
+        else:
+            await callback.answer(
+                f"⚡ Удобрение применено! Рост ускорен на {acceleration} сек. "
+                f"Растение созрело!"
+            )
+    except Exception as e:
+        import logging
+        logging.error(f"Error fertilizing plot: {e}")
+        await callback.answer("❌ Ошибка применения удобрения!", show_alert=True)
+        return
+    
     await show_farm(callback.from_user.id, callback.message)
 
 
@@ -648,21 +1141,48 @@ async def quests_handler(message: Message):
 
 @router.callback_query(F.data.startswith("claim_quest_"))
 async def claim_quest_reward(callback: CallbackQuery):
-    quest_id = int(callback.data.split("_")[2])
+    try:
+        quest_id = int(callback.data.split("_")[2])
+    except (IndexError, ValueError):
+        await callback.answer("❌ Неверный формат данных!", show_alert=True)
+        return
+    
     db = await get_db()
+    
+    # Проверяем что квест действительно выполнен перед выдачей награды
+    quest = await db.fetchone(
+        """SELECT quest_id, completed, claimed FROM user_quests 
+           WHERE user_id = ? AND quest_id = ?""",
+        (callback.from_user.id, quest_id)
+    )
+
+    if not quest:
+        await callback.answer("❌ Квест не найден!", show_alert=True)
+        return
+    
+    if not quest['completed']:
+        await callback.answer("❌ Квест ещё не выполнен!", show_alert=True)
+        return
+    
+    if quest['claimed']:
+        await callback.answer("❌ Награда уже получена!", show_alert=True)
+        return
     
     result = await db.claim_quest_reward(callback.from_user.id, quest_id)
     
-    if result['success']:
-        rewards_text = f"💰 {result['coins']}🪙"
-        if result['items']:
-            for item, qty in result['items'].items():
+    if result.get('success', False):
+        rewards_text = f"💰 {result.get('coins', 0)}🪙"
+        items = result.get('items', {})
+        if items and isinstance(items, dict):
+            for item, qty in items.items():
                 rewards_text += f", {item} x{qty}"
         
         await callback.answer(f"🎁 Получено: {rewards_text}!")
+        # Перерисовываем список квестов (используем callback.message)
         await quests_handler(callback.message)
     else:
-        await callback.answer(f"❌ {result['message']}", show_alert=True)
+        error_message = result.get('message', 'Неизвестная ошибка')
+        await callback.answer(f"❌ {error_message}", show_alert=True)
 
 
 # =================== ДОСТИЖЕНИЯ (НОВАЯ СИСТЕМА) ===================
@@ -1011,6 +1531,29 @@ async def achievements_all(callback: CallbackQuery):
     ])
     
     await callback.message.edit_text("\n".join(text_lines), reply_markup=keyboard, parse_mode="HTML")
+
+
+# =================== УНИВЕРСАЛЬНЫЕ ОБРАБОТЧИКИ "НАЗАД" ===================
+
+@router.callback_query(F.data.startswith("back_"))
+async def universal_back_handler(callback: CallbackQuery):
+    """Универсальный обработчик для кнопок назад"""
+    target = callback.data.replace("back_", "")
+
+    if target == "farm":
+        await show_farm(callback.from_user.id, callback.message)
+    elif target == "main":
+        await callback.message.answer(
+            "Главное меню",
+            reply_markup=get_main_keyboard()
+        )
+    elif target == "achievements":
+        from aiogram.types import Message
+        msg = callback.message
+        msg.from_user = callback.from_user
+        await achievements_handler(msg)
+    else:
+        await callback.answer("Функция в разработке")
 
 
 # =================== ASCII ГРАФИКА ===================
