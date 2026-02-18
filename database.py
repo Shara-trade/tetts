@@ -1848,6 +1848,44 @@ class Database:
                 await db.close()
 
     
+# Дополнительные методы для админ-панели
+    
+    async def get_admins(self) -> List[Dict]:
+        """Получает список всех администраторов"""
+        rows = await self.fetchall(
+            """SELECT ar.user_id, ar.role, ar.assigned_at, 
+                      u.username, u.first_name
+               FROM admin_roles ar
+               LEFT JOIN users u ON ar.user_id = u.user_id
+               ORDER BY CASE ar.role 
+                   WHEN 'creator' THEN 1 
+                   WHEN 'admin' THEN 2 
+                   WHEN 'moderator' THEN 3 
+               END, ar.assigned_at DESC"""
+        )
+        
+        return [
+            {
+                "user_id": r[0], 
+                "role": r[1], 
+                "assigned_at": r[2],
+                "username": r[3], 
+                "first_name": r[4]
+            } 
+            for r in rows
+        ]
+    
+    async def log_admin_action(self, admin_id: int, action: str, 
+                               target_id: int = None, details: dict = None):
+        """Логирует действие администратора (упрощенная версия)"""
+        import json
+        await self.execute(
+            """INSERT INTO admin_logs (admin_id, action, target_user_id, details)
+               VALUES (?, ?, ?, ?)""",
+            (admin_id, action, target_id, json.dumps(details) if details else None),
+            commit=True
+        )
+
 # Инициализация базы данных (для запуска отдельно)
 async def init_db():
     db = Database()
