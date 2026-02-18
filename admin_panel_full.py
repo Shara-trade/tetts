@@ -265,6 +265,9 @@ async def admin_process_user_id(message: Message, state: FSMContext):
     """Обработка введенного ID"""
     try:
         user_id = int(message.text.strip())
+        if user_id <= 0:
+            await message.answer("❌ ID должен быть положительным числом!")
+            return
     except ValueError:
         await message.answer("❌ Введи числовой ID!")
         return
@@ -315,7 +318,7 @@ async def admin_last_players(callback: CallbackQuery):
            FROM users WHERE is_banned = 0 
            ORDER BY joined_date DESC LIMIT 10"""
     )
-    
+
     if not rows:
         await callback.answer("Нет зарегистрированных игроков!")
         return
@@ -1290,33 +1293,45 @@ async def show_user_profile(target, user_id: int):
     
     # Получаем дату регистрации и последнюю активность
     user_info = await db.fetchone(
-        "SELECT joined_date, last_activity, is_banned, ban_reason, ban_until, gems FROM users WHERE user_id = ?",
+        "SELECT joined_date, last_activity, is_banned, ban_reason, ban_until, gems, xp, level FROM users WHERE user_id = ?",
         (user_id,)
     )
     
-    joined_date = user_info[0] if user_info else "Неизвестно"
-    last_activity = user_info[1] if user_info else "Неизвестно"
-    is_banned = user_info[2] if user_info else False
-    ban_reason = user_info[3] if user_info else None
-    ban_until = user_info[4] if user_info else None
-    gems = user_info[5] if user_info and user_info[5] else 0
+    if not user_info:
+        if isinstance(target, CallbackQuery):
+            await target.answer("❌ Ошибка загрузки данных!", show_alert=True)
+        else:
+            await target.answer("❌ Ошибка загрузки данных!")
+        return
     
-    # Форматируем даты
+    joined_date = user_info[0] or "Неизвестно"
+    last_activity = user_info[1] or "Неизвестно"
+    is_banned = user_info[2] or False
+    ban_reason = user_info[3] or None
+    ban_until = user_info[4] or None
+    gems = user_info[5] or 0
+    xp = user_info[6] or 0
+    level = user_info[7] or 1
+
+    # Форматируем даты с обработкой ошибок
     if last_activity and last_activity != "Неизвестно":
         try:
             last_dt = datetime.fromisoformat(last_activity.replace('Z', '+00:00'))
             delta = datetime.now() - last_dt.replace(tzinfo=None)
-            if delta.days > 0:
+            # Проверяем что delta не отрицательное
+            if delta.total_seconds() < 0:
+                last_text = "Только что"
+            elif delta.days > 0:
                 last_text = f"{delta.days} дн. назад"
             elif delta.seconds // 3600 > 0:
                 last_text = f"{delta.seconds // 3600} ч. назад"
             else:
                 last_text = f"{delta.seconds // 60} мин. назад"
-        except:
-            last_text = str(last_activity)[:16]
+        except (ValueError, AttributeError, TypeError):
+            last_text = str(last_activity)[:16] if last_activity else "Неизвестно"
     else:
         last_text = "Неизвестно"
-    
+
     # Статус бана
     if is_banned:
         ban_status = "🔴 Забанен"
@@ -1326,12 +1341,12 @@ async def show_user_profile(target, user_id: int):
             ban_status += f"\n📝 Причина: {ban_reason}"
     else:
         ban_status = "🟢 Активен"
-    
+
     # Инвентарь (первые 5)
     inv_text = ""
     for i, (item, qty) in enumerate(list(inventory.items())[:5]):
         inv_text += f"• {item}: {qty} шт\n"
-    
+
     text = f"""👤 <b>Профиль игрока</b>
 
 🆔 ID: <code>{user_id}</code>
@@ -1344,6 +1359,7 @@ async def show_user_profile(target, user_id: int):
 🪙 Монеты: {user['balance']:,}
 💎 Кристаллы: {gems:,}
 🏆 Престиж: {user['prestige_level']} (x{user['prestige_multiplier']:.1f})
+⭐ Опыт: {xp:,} (Ур. {level})
 
 🌾 <b>Инвентарь:</b>
 {inv_text or 'Пусто'}
@@ -1352,7 +1368,7 @@ async def show_user_profile(target, user_id: int):
 🌾 Собрано урожая: {user['total_harvested']}
 🌱 Посажено: {user['total_planted']}
 🏙️ Уровень города: {user['city_level']}
-💵 Всего заработано: {user['total_earned']:,}🪙
+💵 Всего заработано: {user.get('total_earned', 0):,}🪙
 
 {ban_status}"""
     
