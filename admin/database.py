@@ -80,11 +80,45 @@ class Database:
                 logging.warning(f"⚠️ SQL файл {sql_file_path} не найден. Создаём базовые таблицы...")
                 await self._create_basic_tables()
             
+            # Проверяем и добавляем недостающие колонки (миграции)
+            await self._migrate_database()
+            
             return True
             
         except Exception as e:
             logging.error(f"❌ Ошибка инициализации базы данных: {e}")
             return False
+
+    async def _migrate_database(self):
+        """Выполняет миграции базы данных - добавляет недостающие колонки"""
+        db = await self.connect()
+        
+        try:
+            # Получаем список существующих колонок в таблице plots
+            cursor = await db.execute("PRAGMA table_info(plots)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            # Добавляем недостающие колонки в plots
+            migrations = [
+                ('fertilized', 'INTEGER DEFAULT 0'),
+                ('fertilizer_type', 'TEXT'),
+                ('fertilizer_bonus', 'REAL DEFAULT 0.0'),
+            ]
+        
+            for col_name, col_type in migrations:
+                if col_name not in column_names:
+                    try:
+                        await db.execute(f"ALTER TABLE plots ADD COLUMN {col_name} {col_type}")
+                        await db.commit()
+                        logging.info(f"✅ Добавлена колонка {col_name} в таблицу plots")
+                    except Exception as e:
+                        logging.warning(f"⚠️ Не удалось добавить колонку {col_name}: {e}")
+            
+            logging.info("✅ Миграции базы данных выполнены")
+            
+        except Exception as e:
+            logging.error(f"❌ Ошибка миграции: {e}")
 
     async def _create_basic_tables(self):
         """Создаёт базовые таблицы если SQL файл недоступен"""
@@ -471,7 +505,7 @@ class Database:
             await db.execute(query, params)
             if commit:
                 await db.commit()
-    
+                
     async def fetchall(self, query: str, params=()):
         async with self.lock:
             db = await self.connect()
