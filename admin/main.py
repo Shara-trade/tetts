@@ -194,7 +194,7 @@ async def main():
     
     # Инициализация БД (синглтон)
     db = await get_database()
-    await db.init_from_sql("data/init_db.sql")
+    await db.init_db("data/init_db.sql")
     
     # Установка команд
     await set_commands(bot)
