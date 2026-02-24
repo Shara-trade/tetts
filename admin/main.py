@@ -1,11 +1,12 @@
 import asyncio
 import logging
+import os
+
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 from dotenv import load_dotenv
-import os
 
 from handlers import router as player_router
 from admin_panel_full import router as admin_router
@@ -193,7 +194,7 @@ async def main():
     
     # Инициализация БД (синглтон)
     db = await get_database()
-    await db.init_from_sql("data/init_db.sql")
+    await db.init_db()  # Создаём все таблицы
     
     # Установка команд
     await set_commands(bot)
