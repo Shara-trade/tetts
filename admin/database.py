@@ -94,10 +94,36 @@ class Database:
         db = await self.connect()
         
         try:
+            # Проверяем существование таблицы plots
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='plots'")
+            table_exists = await cursor.fetchone()
+            
+            if not table_exists:
+                logging.info("Таблица plots не существует, создаём...")
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS plots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        plot_number INTEGER NOT NULL,
+                        status TEXT DEFAULT 'empty',
+                        crop_type TEXT,
+                        planted_time TEXT,
+                        growth_time_seconds INTEGER DEFAULT 0,
+                        fertilized INTEGER DEFAULT 0,
+                        fertilizer_type TEXT,
+                        fertilizer_bonus REAL DEFAULT 0.0,
+                        UNIQUE(user_id, plot_number)
+                    )
+                ''')
+                await db.commit()
+                logging.info("✅ Таблица plots создана")
+                return
+            
             # Получаем список существующих колонок в таблице plots
             cursor = await db.execute("PRAGMA table_info(plots)")
             columns = await cursor.fetchall()
             column_names = [col[1] for col in columns]
+            logging.info(f"Существующие колонки в plots: {column_names}")
             
             # Добавляем недостающие колонки в plots
             migrations = [
@@ -105,7 +131,7 @@ class Database:
                 ('fertilizer_type', 'TEXT'),
                 ('fertilizer_bonus', 'REAL DEFAULT 0.0'),
             ]
-        
+            
             for col_name, col_type in migrations:
                 if col_name not in column_names:
                     try:
