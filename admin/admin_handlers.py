@@ -9,7 +9,7 @@ from typing import Dict, List
 import logging
 import os
 
-from .database import Database
+from admin.database import Database
 from .keyboards import get_main_keyboard
 
 router = Router()
