@@ -12,7 +12,7 @@ import sys
 
 # Добавляем родительскую директорию в путь для импортов
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from database import Database
+from database  import get_database
 from keyboards import get_main_keyboard
 
 router = Router()
