@@ -43,52 +43,426 @@ class Database:
             self._db = None
     
     async def init_db(self, sql_file_path: str = "data/init_db.sql") -> bool:
-        """Инициализирует базу данных: создаёт таблицы если их нет
+        """Инициализация базы данных - создаёт все таблицы"""
+        print("🔧 Инициализация БД...")
         
-        Args:
-            sql_file_path: Путь к SQL файлу со схемой
+        async with aiosqlite.connect(self.db_path) as db:
+            # Таблица users
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    first_name TEXT DEFAULT 'Игрок',
+                    username TEXT,
+                    balance INTEGER DEFAULT 100,
+                    gems INTEGER DEFAULT 0,
+                    prestige_level INTEGER DEFAULT 1,
+                    prestige_multiplier REAL DEFAULT 1.0,
+                    city_level INTEGER DEFAULT 1,
+                    total_harvested INTEGER DEFAULT 0,
+                    total_planted INTEGER DEFAULT 0,
+                    total_earned INTEGER DEFAULT 0,
+                    total_spent INTEGER DEFAULT 0,
+                    joined_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                    last_activity TEXT DEFAULT CURRENT_TIMESTAMP,
+                    is_banned INTEGER DEFAULT 0,
+                    settings TEXT DEFAULT '{}'
+                )
+            ''')
             
-        Returns:
-            True если успешно
-        """
-        try:
-            # Проверяем существование файла БД
-            db_exists = os.path.exists(self.db_path)
+            # Таблица plots (с ВСЕМИ колонками)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS plots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    plot_number INTEGER NOT NULL,
+                    status TEXT DEFAULT 'empty',
+                    crop_type TEXT,
+                    planted_time TEXT,
+                    growth_time_seconds INTEGER DEFAULT 0,
+                    fertilized INTEGER DEFAULT 0,
+                    fertilizer_type TEXT,
+                    fertilizer_bonus REAL DEFAULT 0.0,
+                    UNIQUE(user_id, plot_number)
+                )
+            ''')
             
-            if not db_exists:
-                logging.info(f"База данных {self.db_path} не существует. Создаём новую...")
-            else:
-                logging.info(f"База данных {self.db_path} существует. Проверяем таблицы...")
+            # Таблица inventory
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS inventory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    item_code TEXT NOT NULL,
+                    quantity INTEGER DEFAULT 1,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, item_code)
+                )
+            ''')
             
-            # Подключаемся к базе (создаст файл если его нет)
-            db = await self.connect()
+            # Таблица shop_config
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS shop_config (
+                    item_code TEXT PRIMARY KEY,
+                    item_name TEXT NOT NULL,
+                    item_icon TEXT DEFAULT '🌱',
+                    category TEXT NOT NULL,
+                    buy_price INTEGER DEFAULT 0,
+                    sell_price INTEGER DEFAULT 0,
+                    growth_time INTEGER DEFAULT 0,
+                    required_level INTEGER DEFAULT 1,
+                    is_active INTEGER DEFAULT 1,
+                    effect_type TEXT,
+                    effect_value REAL,
+                    description TEXT
+                )
+            ''')
             
-            # Если есть SQL файл - выполняем его
-            if os.path.exists(sql_file_path):
-                with open(sql_file_path, 'r', encoding='utf-8') as f:
-                    sql_script = f.read()
+            # Таблица admin_roles
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS admin_roles (
+                    user_id INTEGER PRIMARY KEY,
+                    role TEXT NOT NULL,
+                    assigned_by INTEGER,
+                    assigned_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Таблица promocodes
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS promocodes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT UNIQUE NOT NULL,
+                    reward_json TEXT NOT NULL,
+                    description TEXT,
+                    max_uses INTEGER DEFAULT 0,
+                    times_used INTEGER DEFAULT 0,
+                    valid_from TEXT DEFAULT CURRENT_TIMESTAMP,
+                    valid_until TEXT,
+                    is_active INTEGER DEFAULT 1
+                )
+            ''')
+            
+            # Таблица promo_activations
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS promo_activations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    promo_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    activated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(promo_id, user_id)
+                )
+            ''')
+        
+            # Таблица admin_logs
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS admin_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    admin_id INTEGER NOT NULL,
+                    action_type TEXT NOT NULL,
+                    target_user_id INTEGER,
+                    target_entity_id TEXT,
+                    old_value TEXT,
+                    new_value TEXT,
+                    reason TEXT,
+                    details TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Таблица user_daily
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_daily (
+                    user_id INTEGER PRIMARY KEY,
+                    current_streak INTEGER DEFAULT 0,
+                    last_claim_date TEXT
+                )
+            ''')
                 
-                # Выполняем SQL скрипт
-                await db.executescript(sql_script)
-                await db.commit()
+            # Таблица daily_rewards
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS daily_rewards (
+                    day_number INTEGER PRIMARY KEY,
+                    coins INTEGER DEFAULT 0,
+                    gems INTEGER DEFAULT 0,
+                    items_json TEXT
+                )
+            ''')
                 
-                if not db_exists:
-                    logging.info(f"✅ База данных создана и инициализирована из {sql_file_path}")
-                else:
-                    logging.info(f"✅ Таблицы проверены/обновлены из {sql_file_path}")
-            else:
-                logging.warning(f"⚠️ SQL файл {sql_file_path} не найден. Создаём базовые таблицы...")
-                await self._create_basic_tables()
+            # Таблица quests
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS quests (
+                    quest_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    quest_type TEXT NOT NULL,
+                    target_item TEXT,
+                    target_count INTEGER NOT NULL,
+                    description TEXT NOT NULL,
+                    reward_coins INTEGER DEFAULT 0,
+                    reward_gems INTEGER DEFAULT 0,
+                    reward_items_json TEXT,
+                    is_daily INTEGER DEFAULT 1,
+                    is_active INTEGER DEFAULT 1
+                )
+            ''')
+                
+            # Таблица user_quests
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_quests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    quest_id INTEGER NOT NULL,
+                    assigned_date TEXT NOT NULL,
+                    progress INTEGER DEFAULT 0,
+                    completed INTEGER DEFAULT 0,
+                    claimed INTEGER DEFAULT 0,
+                    UNIQUE(user_id, quest_id, assigned_date)
+                )
+            ''')
+                
+            # Таблица achievement_categories
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS achievement_categories (
+                    category_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    icon TEXT DEFAULT '🏆',
+                    description TEXT,
+                    sort_order INTEGER DEFAULT 0
+                )
+            ''')
+                
+            # Таблица achievements
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS achievements (
+                    achievement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    icon TEXT DEFAULT '🏆',
+                    category_id TEXT NOT NULL,
+                    requirement_type TEXT NOT NULL,
+                    requirement_count INTEGER NOT NULL,
+                    reward_coins INTEGER DEFAULT 0,
+                    reward_gems INTEGER DEFAULT 0,
+                    is_active INTEGER DEFAULT 1
+                )
+            ''')
             
-            # Проверяем и добавляем недостающие колонки (миграции)
-            await self._migrate_database()
+            # Таблица player_achievements
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS player_achievements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    achievement_id INTEGER NOT NULL,
+                    progress INTEGER DEFAULT 0,
+                    completed INTEGER DEFAULT 0,
+                    reward_claimed INTEGER DEFAULT 0,
+                    completed_at TEXT,
+                    claimed_at TEXT,
+                    UNIQUE(user_id, achievement_id)
+                )
+            ''')
+                
+            # Таблица notifications
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS notifications (
+                    notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    sent INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+                
+            # Таблица economy_logs
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS economy_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    operation_type TEXT NOT NULL,
+                    currency_type TEXT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    item_id TEXT,
+                    balance_after INTEGER,
+                    source TEXT,
+                    source_id TEXT,
+                    details TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+                
+            # Таблица farmers
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS farmers (
+                    farmer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    farmer_type TEXT NOT NULL,
+                    status TEXT DEFAULT 'active',
+                    bonus_percent INTEGER DEFAULT 0,
+                    uses_fertilizer INTEGER DEFAULT 0,
+                    hired_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TEXT,
+                    last_work TEXT,
+                    total_planted INTEGER DEFAULT 0,
+                    total_harvested INTEGER DEFAULT 0,
+                    total_earned INTEGER DEFAULT 0,
+                    total_salary_paid INTEGER DEFAULT 0
+                )
+            ''')
+                
+            # Таблица farmer_types
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS farmer_types (
+                    type_code TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    icon TEXT DEFAULT '👤',
+                    description TEXT,
+                    duration_days INTEGER,
+                    price_coins INTEGER DEFAULT 0,
+                    price_gems INTEGER DEFAULT 0,
+                    bonus_percent INTEGER DEFAULT 0,
+                    salary_per_hour INTEGER DEFAULT 0,
+                    work_interval_seconds INTEGER DEFAULT 60,
+                    is_active INTEGER DEFAULT 1
+                )
+            ''')
             
+            # Таблица upgrades
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS upgrades (
+                    upgrade_code TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    icon TEXT DEFAULT '⬆️',
+                    description TEXT,
+                    category TEXT NOT NULL,
+                    max_level INTEGER DEFAULT 10,
+                    base_price INTEGER DEFAULT 1000,
+                    price_multiplier REAL DEFAULT 1.5,
+                    effect_type TEXT NOT NULL,
+                    effect_value REAL DEFAULT 0.1,
+                    required_prestige INTEGER DEFAULT 20,
+                    is_active INTEGER DEFAULT 1
+                )
+            ''')
+                
+            # Таблица user_upgrades
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_upgrades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    upgrade_code TEXT NOT NULL,
+                    current_level INTEGER DEFAULT 0,
+                    total_spent INTEGER DEFAULT 0,
+                    UNIQUE(user_id, upgrade_code)
+                )
+            ''')
+                
+            # Таблица seasonal_events
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS seasonal_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    season TEXT,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    multiplier REAL DEFAULT 1.0,
+                    is_active INTEGER DEFAULT 1
+                )
+            ''')
+            
+            # Таблица event_leaderboard
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS event_leaderboard (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    score INTEGER DEFAULT 0,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(event_id, user_id)
+                )
+            ''')
+                
+            # Таблица system_settings
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS system_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    description TEXT,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+                
+            # Таблица referrals
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS referrals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    referrer_id INTEGER NOT NULL,
+                    referred_id INTEGER NOT NULL,
+                    joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(referrer_id, referred_id)
+                )
+            ''')
+                
+            # Таблица referral_rewards
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS referral_rewards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    referrer_id INTEGER NOT NULL,
+                    referred_id INTEGER NOT NULL,
+                    reward_type TEXT NOT NULL,
+                    reward_coins INTEGER DEFAULT 0,
+                    reward_gems INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+                
+            # Таблица transfers
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS transfers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender_id INTEGER NOT NULL,
+                    receiver_id INTEGER NOT NULL,
+                    amount INTEGER NOT NULL,
+                    fee INTEGER DEFAULT 0,
+                    total_amount INTEGER NOT NULL,
+                    status TEXT DEFAULT 'completed',
+                    description TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+                
+            # Таблица transfer_limits
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS transfer_limits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    daily_limit INTEGER DEFAULT 0,
+                    base_percentage REAL DEFAULT 0.20,
+                    prestige_bonus REAL DEFAULT 0.0,
+                    used_today INTEGER DEFAULT 0,
+                    last_reset TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+                
+            # Таблица achievement_logs (логи получения достижений)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS achievement_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    achievement_id INTEGER NOT NULL,
+                    level INTEGER DEFAULT 1,
+                    progress_before INTEGER DEFAULT 0,
+                    progress_after INTEGER,
+                    completed BOOLEAN DEFAULT 0,
+                    reward_coins INTEGER DEFAULT 0,
+                    reward_gems INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+                
+            await db.commit()
+            print("✅ Все таблицы созданы!")
             return True
-            
-        except Exception as e:
-            logging.error(f"❌ Ошибка инициализации базы данных: {e}")
-            return False
-
+        
     async def _migrate_database(self):
         """Выполняет миграции базы данных - добавляет недостающие колонки"""
         db = await self.connect()
