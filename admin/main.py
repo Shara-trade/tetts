@@ -193,8 +193,11 @@ async def main():
     dp.include_router(admin_new_router)
     
     # Инициализация БД (синглтон)
+    print("🔧 Шаг 1: Подключаемся к БД...")
     db = await get_database()
+    print("🔧 Шаг 2: Создаём таблицы...")
     await db.init_db("data/init_db.sql")
+    print("✅ Шаг 3: БД готова!")
     
     # Установка команд
     await set_commands(bot)
