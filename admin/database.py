@@ -1091,14 +1091,24 @@ class Database:
                     settings = {}
         
             return {
-                "user_id": row[0], "username": row[1], "first_name": row[2],
-                "balance": row[3], "gems": row[4],
-                "prestige_level": row[5], "prestige_multiplier": row[6],
-                "city_level": row[7], "total_harvested": row[8],
-                "total_planted": row[9], "total_earned": row[10], "total_spent": row[11],
-                "joined_date": row[12] if len(row) > 12 else None,
-                "last_activity": row[13] if len(row) > 13 else None,
-                "daily_streak": row[17] if len(row) > 17 else 0,
+                "user_id": row[0],
+                "first_name": row[1] or 'Игрок', 
+                "username": row[2],
+                "balance": row[3] or 0, 
+                "gems": row[4] or 0,
+                "prestige_level": row[5] or 1, 
+                "prestige_multiplier": row[6] or 1.0,
+                "xp": row[7] or 0,
+                "level": row[8] or 1,
+                "city_level": row[9] or 1, 
+                "total_harvested": row[10] or 0,
+                "total_planted": row[11] or 0, 
+                "total_earned": row[12] or 0, 
+                "total_spent": row[13] or 0,
+                "joined_date": row[14] if len(row) > 14 else None,
+                "last_activity": row[15] if len(row) > 15 else None,
+                "is_banned": row[16] if len(row) > 16 else 0,
+                "daily_streak": row[20] if len(row) > 20 else 0,
                 "settings": settings,
                 "selected_achievements": []
             }
