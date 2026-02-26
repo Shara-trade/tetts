@@ -1078,28 +1078,43 @@ class Database:
         )
         
     async def get_user(self, user_id: int) -> Optional[Dict]:
-        # Явно указываем поля в нужном порядке вместо SELECT *
-        row = await self.fetchone(
-            """SELECT user_id, first_name, username, balance, gems, 
-                prestige_level, prestige_multiplier, xp, level, city_level,
-                total_harvested, total_planted, total_earned, total_spent,
-                joined_date, last_activity, is_banned, ban_reason, ban_until,
-                last_daily_claim, daily_streak, settings, selected_achievements
-            FROM users WHERE user_id = ? AND is_banned = 0""", 
-            (user_id,)
-        )
+        # Проверяем наличие колонки selected_achievements
+        conn = await self.connect()
+        cursor = await conn.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        has_selected_achievements = 'selected_achievements' in columns
+        
+        # Формируем запрос в зависимости от наличия колонки
+        if has_selected_achievements:
+            query = """SELECT user_id, first_name, username, balance, gems, 
+                    prestige_level, prestige_multiplier, xp, level, city_level,
+                    total_harvested, total_planted, total_earned, total_spent,
+                    joined_date, last_activity, is_banned, ban_reason, ban_until,
+                    last_daily_claim, daily_streak, settings, selected_achievements
+                FROM users WHERE user_id = ? AND is_banned = 0"""
+        else:
+            query = """SELECT user_id, first_name, username, balance, gems, 
+                    prestige_level, prestige_multiplier, xp, level, city_level,
+                    total_harvested, total_planted, total_earned, total_spent,
+                    joined_date, last_activity, is_banned, ban_reason, ban_until,
+                    last_daily_claim, daily_streak, settings
+                FROM users WHERE user_id = ? AND is_banned = 0"""
+        
+        row = await self.fetchone(query, (user_id,))
+        
         if row:
             # Парсим settings JSON
             settings = {}
-            if row[21]:  # settings column
+            settings_idx = 21 if has_selected_achievements else 21
+            if len(row) > settings_idx and row[settings_idx]:
                 try:
-                    settings = json.loads(row[21])
+                    settings = json.loads(row[settings_idx])
                 except (json.JSONDecodeError, TypeError):
                     settings = {}
             
             # Парсим selected_achievements JSON
             selected_achievements = []
-            if row[22]:  # selected_achievements column
+            if has_selected_achievements and len(row) > 22 and row[22]:
                 try:
                     selected_achievements = json.loads(row[22])
                 except (json.JSONDecodeError, TypeError):
