@@ -452,7 +452,9 @@ class Database:
                     level INTEGER DEFAULT 1,
                     progress_before INTEGER DEFAULT 0,
                     progress_after INTEGER,
-                    completed BOOLEAN DEFAULT 0,
+                    completed INTEGER DEFAULT 0,
+                    action TEXT,
+                    reward_claimed TEXT,
                     reward_coins INTEGER DEFAULT 0,
                     reward_gems INTEGER DEFAULT 0,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -460,65 +462,202 @@ class Database:
             ''')
                 
             await db.commit()
-            print("✅ Все таблицы созданы!")
-            return True
         
+        # Запускаем миграции для старых БД
+        await self._migrate_database()
+        
+        print("✅ Все таблицы созданы!")
+        return True
+    
     async def _migrate_database(self):
-        """Выполняет миграции базы данных - добавляет недостающие колонки"""
+        """Выполняет миграции базы данных - добавляет недостающие колонки во все таблицы"""
         db = await self.connect()
         
         try:
-            # Проверяем существование таблицы plots
-            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='plots'")
-            table_exists = await cursor.fetchone()
+            logging.info("🔧 Начинаем миграцию базы данных...")
             
-            if not table_exists:
-                logging.info("Таблица plots не существует, создаём...")
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS plots (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER NOT NULL,
-                        plot_number INTEGER NOT NULL,
-                        status TEXT DEFAULT 'empty',
-                        crop_type TEXT,
-                        planted_time TEXT,
-                        growth_time_seconds INTEGER DEFAULT 0,
-                        fertilized INTEGER DEFAULT 0,
-                        fertilizer_type TEXT,
-                        fertilizer_bonus REAL DEFAULT 0.0,
-                        UNIQUE(user_id, plot_number)
-                    )
-                ''')
-                await db.commit()
-                logging.info("✅ Таблица plots создана")
-                return
-            
-            # Получаем список существующих колонок в таблице plots
-            cursor = await db.execute("PRAGMA table_info(plots)")
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            logging.info(f"Существующие колонки в plots: {column_names}")
-            
-            # Добавляем недостающие колонки в plots
-            migrations = [
-                ('fertilized', 'INTEGER DEFAULT 0'),
-                ('fertilizer_type', 'TEXT'),
-                ('fertilizer_bonus', 'REAL DEFAULT 0.0'),
-            ]
-            
-            for col_name, col_type in migrations:
-                if col_name not in column_names:
-                    try:
+            # ========== МИГРАЦИЯ ТАБЛИЦЫ PLOTS ==========
+            try:
+                cursor = await db.execute("PRAGMA table_info(plots)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                plots_migrations = [
+                    ('fertilized', 'INTEGER DEFAULT 0'),
+                    ('fertilizer_type', 'TEXT'),
+                    ('fertilizer_bonus', 'REAL DEFAULT 0.0'),
+                ]
+                
+                for col_name, col_type in plots_migrations:
+                    if col_name not in column_names:
                         await db.execute(f"ALTER TABLE plots ADD COLUMN {col_name} {col_type}")
                         await db.commit()
-                        logging.info(f"✅ Добавлена колонка {col_name} в таблицу plots")
-                    except Exception as e:
-                        logging.warning(f"⚠️ Не удалось добавить колонку {col_name}: {e}")
+                        logging.info(f"✅ plots: добавлена колонка {col_name}")
+            except Exception as e:
+                logging.warning(f"⚠️ Ошибка миграции plots: {e}")
             
-            logging.info("✅ Миграции базы данных выполнены")
+            # ========== МИГРАЦИЯ ТАБЛИЦЫ USERS ==========
+            try:
+                cursor = await db.execute("PRAGMA table_info(users)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                users_migrations = [
+                    ('settings', "TEXT DEFAULT '{}'"),
+                    ('first_name', "TEXT DEFAULT 'Игрок'"),
+                    ('total_spent', 'INTEGER DEFAULT 0'),
+                    ('gems', 'INTEGER DEFAULT 0'),
+                ]
+                
+                for col_name, col_type in users_migrations:
+                    if col_name not in column_names:
+                        await db.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}")
+                        await db.commit()
+                        logging.info(f"✅ users: добавлена колонка {col_name}")
+            except Exception as e:
+                logging.warning(f"⚠️ Ошибка миграции users: {e}")
+            
+            # ========== МИГРАЦИЯ ТАБЛИЦЫ SHOP_CONFIG ==========
+            try:
+                cursor = await db.execute("PRAGMA table_info(shop_config)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                shop_migrations = [
+                    ('item_icon', "TEXT DEFAULT '🌱'"),
+                    ('yield_amount', 'INTEGER DEFAULT 1'),
+                    ('required_level', 'INTEGER DEFAULT 1'),
+                    ('exp_reward', 'INTEGER DEFAULT 10'),
+                    ('sort_order', 'INTEGER DEFAULT 0'),
+                    ('is_seasonal', 'INTEGER DEFAULT 0'),
+                    ('season', 'TEXT'),
+                    ('effect_type', 'TEXT'),
+                    ('effect_value', 'REAL'),
+                    ('description', 'TEXT'),
+                    ('created_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+                    ('created_by', 'INTEGER'),
+                ]
+                
+                for col_name, col_type in shop_migrations:
+                    if col_name not in column_names:
+                        await db.execute(f"ALTER TABLE shop_config ADD COLUMN {col_name} {col_type}")
+                        await db.commit()
+                        logging.info(f"✅ shop_config: добавлена колонка {col_name}")
+            except Exception as e:
+                logging.warning(f"⚠️ Ошибка миграции shop_config: {e}")
+            
+            # ========== МИГРАЦИЯ ТАБЛИЦЫ NOTIFICATIONS ==========
+            try:
+                cursor = await db.execute("PRAGMA table_info(notifications)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                if 'user_id' not in column_names:
+                    # Если нет user_id, нужно добавить и создать правильную структуру
+                    await db.execute(f"ALTER TABLE notifications ADD COLUMN user_id INTEGER")
+                    await db.commit()
+                    logging.info(f"✅ notifications: добавлена колонка user_id")
+            except Exception as e:
+                logging.warning(f"⚠️ Ошибка миграции notifications: {e}")
+            
+            # ========== МИГРАЦИЯ ТАБЛИЦЫ QUESTS ==========
+            try:
+                cursor = await db.execute("PRAGMA table_info(quests)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                quests_migrations = [
+                    ('reward_gems', 'INTEGER DEFAULT 0'),
+                    ('is_weekly', 'INTEGER DEFAULT 0'),
+                    ('sort_order', 'INTEGER DEFAULT 0'),
+                ]
+                
+                for col_name, col_type in quests_migrations:
+                    if col_name not in column_names:
+                        await db.execute(f"ALTER TABLE quests ADD COLUMN {col_name} {col_type}")
+                        await db.commit()
+                        logging.info(f"✅ quests: добавлена колонка {col_name}")
+            except Exception as e:
+                logging.warning(f"⚠️ Ошибка миграции quests: {e}")
+            
+            # ========== МИГРАЦИЯ ТАБЛИЦЫ USER_DAILY ==========
+            try:
+                cursor = await db.execute("PRAGMA table_info(user_daily)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                if 'last_claim_date' not in column_names:
+                    await db.execute("ALTER TABLE user_daily ADD COLUMN last_claim_date TEXT")
+                    await db.commit()
+                    logging.info(f"✅ user_daily: добавлена колонка last_claim_date")
+            except Exception as e:
+                logging.warning(f"⚠️ Ошибка миграции user_daily: {e}")
+            
+            # ========== МИГРАЦИЯ ТАБЛИЦЫ DAILY_REWARDS ==========
+            try:
+                cursor = await db.execute("PRAGMA table_info(daily_rewards)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                if 'gems' not in column_names:
+                    await db.execute("ALTER TABLE daily_rewards ADD COLUMN gems INTEGER DEFAULT 0")
+                    await db.commit()
+                    logging.info(f"✅ daily_rewards: добавлена колонка gems")
+            except Exception as e:
+                logging.warning(f"⚠️ Ошибка миграции daily_rewards: {e}")
+            
+            # ========== МИГРАЦИЯ ТАБЛИЦЫ ACHIEVEMENTS ==========
+            try:
+                cursor = await db.execute("PRAGMA table_info(achievements)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                achievements_migrations = [
+                    ('achievement_type', "TEXT DEFAULT 'regular'"),
+                    ('parent_achievement_id', 'INTEGER'),
+                    ('level', 'INTEGER DEFAULT 1'),
+                    ('event_end_date', 'TEXT'),
+                    ('requirement_item', 'TEXT'),
+                    ('reward_items_json', "TEXT DEFAULT '{}'"),
+                    ('reward_multiplier', 'REAL DEFAULT 0'),
+                    ('is_secret', 'INTEGER DEFAULT 0'),
+                    ('sort_order', 'INTEGER DEFAULT 0'),
+                    ('created_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+                    ('updated_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+                ]
+                
+                for col_name, col_type in achievements_migrations:
+                    if col_name not in column_names:
+                        await db.execute(f"ALTER TABLE achievements ADD COLUMN {col_name} {col_type}")
+                        await db.commit()
+                        logging.info(f"✅ achievements: добавлена колонка {col_name}")
+            except Exception as e:
+                logging.warning(f"⚠️ Ошибка миграции achievements: {e}")
+            
+            # ========== МИГРАЦИЯ ТАБЛИЦЫ PLAYER_ACHIEVEMENTS ==========
+            try:
+                cursor = await db.execute("PRAGMA table_info(player_achievements)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                player_ach_migrations = [
+                    ('notified', 'INTEGER DEFAULT 0'),
+                    ('created_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+                    ('updated_at', 'TEXT DEFAULT CURRENT_TIMESTAMP'),
+                ]
+                
+                for col_name, col_type in player_ach_migrations:
+                    if col_name not in column_names:
+                        await db.execute(f"ALTER TABLE player_achievements ADD COLUMN {col_name} {col_type}")
+                        await db.commit()
+                        logging.info(f"✅ player_achievements: добавлена колонка {col_name}")
+            except Exception as e:
+                logging.warning(f"⚠️ Ошибка миграции player_achievements: {e}")
+            
+            logging.info("✅ Миграции базы данных завершены!")
             
         except Exception as e:
-            logging.error(f"❌ Ошибка миграции: {e}")
+            logging.error(f"❌ Критическая ошибка миграции: {e}")
 
     async def _create_basic_tables(self):
         """Создаёт базовые таблицы если SQL файл недоступен"""
@@ -3370,21 +3509,6 @@ class Database:
         
         return True
     
-    async def get_user_by_username(self, username: str) -> Optional[Dict]:
-        """Ищет пользователя по username"""
-        row = await self.fetchone(
-            "SELECT * FROM users WHERE username = ? OR LOWER(username) = LOWER(?)",
-            (username, username)
-        )
-        if row:
-            return {
-                "user_id": row[0], "username": row[1], "first_name": row[2],
-                "balance": row[3], "prestige_level": row[4], "prestige_multiplier": row[5],
-                "city_level": row[6], "total_harvested": row[7],
-                "is_banned": row[10], "ban_reason": row[11]
-            }
-        return None
-    
     # СЕЗОННЫЕ СОБЫТИЯ
     async def get_active_event(self) -> Optional[Dict]:
         """Получает активное сезонное событие"""
@@ -3461,53 +3585,7 @@ class Database:
             commit=True
         )
     
-    async def log_admin_action(self, admin_id: int, action_type: str, 
-                               target_user_id: int = None, target_entity_id: str = None,
-                               old_value: dict = None, new_value: dict = None, 
-                               reason: str = None, details: dict = None):
-        """Логирует действие администратора"""
-        import json
-        
-        # Получаем роль админа
-        role = await self.get_admin_role(admin_id)
-        
-        await self.execute(
-            """INSERT INTO admin_logs 
-               (admin_id, admin_role, action_type, target_user_id, target_entity_id, 
-                old_value, new_value, reason, details)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (admin_id, role, action_type, target_user_id, target_entity_id,
-             json.dumps(old_value) if old_value else None,
-             json.dumps(new_value) if new_value else None,
-             reason, json.dumps(details) if details else None),
-            commit=True
-        )
-        
-        # Также пишем в общий лог
-        await self.log_event('admin', 'INFO', action_type, admin_id, target_user_id, 'user', 
-                            {'reason': reason, **(details or {})})
     
-    async def log_economy(self, user_id: int, operation_type: str, amount: int,
-                         currency_type: str = 'coins', item_id: str = None,
-                         balance_after: int = None, source: str = None, 
-                         source_id: str = None, details: dict = None):
-        """Логирует экономическую операцию"""
-        import json
-        
-        await self.execute(
-            """INSERT INTO economy_logs 
-               (user_id, operation_type, currency_type, amount, item_id, 
-                balance_after, source, source_id, details)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, operation_type, currency_type, amount, item_id,
-             balance_after, source, source_id, json.dumps(details) if details else None),
-            commit=True
-        )
-        
-        # Пишем в общий лог
-        await self.log_event('economy', 'INFO', operation_type, user_id, None, None, {
-            'amount': amount, 'currency': currency_type, 'source': source, 'balance_after': balance_after
-        })
     
     async def log_progression(self, user_id: int, progression_type: str,
                              old_value: int = None, new_value: int = None,
@@ -3881,43 +3959,7 @@ class Database:
     
 # Дополнительные методы для админ-панели
     
-    async def get_admins(self) -> List[Dict]:
-        """Получает список всех администраторов"""
-        rows = await self.fetchall(
-            """SELECT ar.user_id, ar.role, ar.assigned_at, 
-                      u.username, u.first_name
-               FROM admin_roles ar
-               LEFT JOIN users u ON ar.user_id = u.user_id
-               ORDER BY CASE ar.role 
-                   WHEN 'creator' THEN 1 
-                   WHEN 'admin' THEN 2 
-                   WHEN 'moderator' THEN 3 
-               END, ar.assigned_at DESC"""
-        )
-        
-        return [
-            {
-                "user_id": r[0], 
-                "role": r[1], 
-                "assigned_at": r[2],
-                "username": r[3], 
-                "first_name": r[4]
-            } 
-            for r in rows
-        ]
     
-    async def log_admin_action(self, admin_id: int, action: str, 
-                               target_id: int = None, details: dict = None):
-        """Логирует действие администратора (упрощенная версия)"""
-        import json
-        await self.execute(
-            """INSERT INTO admin_logs (admin_id, action, target_user_id, details)
-               VALUES (?, ?, ?, ?)""",
-            (admin_id, action, target_id, json.dumps(details) if details else None),
-            commit=True
-        )
-
-    # ==================== МЕТОДЫ ДЛЯ ПРОМОКОДОВ ====================
     
     async def get_all_promocodes(self, active_only: bool = False) -> List[Dict]:
         """Получает все промокоды"""
@@ -4248,17 +4290,6 @@ class Database:
             })
         return plants
     
-    async def update_user_settings(self, user_id: int, settings: dict) -> bool:
-        """Обновляет настройки пользователя"""
-        import json
-        await self.execute(
-            "UPDATE users SET settings_json = ? WHERE user_id = ?",
-            (json.dumps(settings), user_id),
-            commit=True
-        )
-        return True
-    
-    # ==================== МЕТОДЫ ДЛЯ ПРОФИЛЯ (ТЗ v4.0) ====================
     
     async def get_user_completed_achievements(self, user_id: int) -> List[Dict]:
         """Получает все выполненные достижения игрока для выбора в профиль"""
@@ -4451,616 +4482,15 @@ class Database:
         
         return row is not None
     
-    async def update_username(self, user_id: int, new_username: str) -> Dict:
-        """Обновляет ник пользователя с проверкой занятости"""
-        import re
-        
-        # Нормализуем ник
-        new_username = new_username.lstrip('@')
-        
-        # Валидация
-        if len(new_username) < 3:
-            return {"success": False, "message": "Ник слишком короткий (минимум 3 символа)"}
-        
-        if len(new_username) > 20:
-            return {"success": False, "message": "Ник слишком длинный (максимум 20 символов)"}
-        
-        # Проверка символов: латиница, цифры, _
-        if not re.match(r'^[a-zA-Z0-9_]+$', new_username):
-            return {"success": False, "message": "Ник может содержать только латиницу, цифры и _"}
-        
-        # Проверка занятости
-        if await self.is_username_taken(new_username):
-            return {"success": False, "message": "Этот ник уже занят"}
-        
-        # Обновляем
-        await self.execute(
-            "UPDATE users SET username = ? WHERE user_id = ?",
-            (new_username, user_id),
-            commit=True
-        )
-        
-        # Логируем
-        await self.log_event('profile', 'INFO', 'username_change', user_id, 
-                            details={"new_username": new_username})
-        
-        return {"success": True, "username": new_username}      
     
-    # ==================== СИСТЕМА КВЕСТОВ (ТЗ v4.0 п.7) ====================
     
-    async def get_daily_quests(self, user_id: int) -> List[Dict]:
-        """Получает ежедневные квесты игрока с прогрессом
-        
-        Согласно ТЗ v4.0 п.7.1 - генерирует случайные квесты на день
-        """
-        from datetime import datetime, date
-        
-        today = date.today().isoformat()
-        
-        # Проверяем, есть ли уже квесты на сегодня
-        existing = await self.fetchall(
-            """SELECT uq.*, q.quest_type, q.target_item, q.target_count, q.description,
-                      q.reward_coins, q.reward_gems, q.reward_items_json
-               FROM user_quests uq
-               JOIN quests q ON uq.quest_id = q.quest_id
-               WHERE uq.user_id = ? AND uq.assigned_date = ? AND q.is_daily = 1
-               ORDER BY q.sort_order""",
-            (user_id, today)
-        )
-        
-        if existing:
-            quests = []
-            for row in existing:
-                quests.append({
-                    'quest_id': row[2],  # quest_id
-                    'quest_type': row[7],
-                    'target_item': row[8],
-                    'target_count': row[9],
-                    'description': row[10],
-                    'reward_coins': row[11] or 0,
-                    'reward_gems': row[12] or 0,
-                    'reward_items': json.loads(row[13]) if row[13] else {},
-                    'progress': row[4] or 0,
-                    'completed': bool(row[5]),
-                    'claimed': bool(row[6])
-                })
-            return quests
-        
-        # Генерируем новые квесты на сегодня
-        # Получаем все активные ежедневные квесты
-        all_daily_quests = await self.fetchall(
-            """SELECT quest_id, quest_type, target_item, target_count, description,
-                      reward_coins, reward_gems, reward_items_json
-               FROM quests 
-               WHERE is_daily = 1 AND is_active = 1
-               ORDER BY RANDOM()
-               LIMIT 3"""
-        )
-        
-        if not all_daily_quests:
-            # Если нет квестов в БД, создаём дефолтные
-            default_quests = [
-                ('harvest', None, 5, 'Собери 5 урожаев', 100, 0, None),
-                ('plant', None, 3, 'Посади 3 семени', 50, 0, None),
-                ('earn', None, 200, 'Заработай 200 монет', 150, 1, None),
-            ]
-            
-            for q in default_quests:
-                await self.execute(
-                    """INSERT INTO quests (quest_type, target_item, target_count, description,
-                        reward_coins, reward_gems, reward_items_json, is_daily, is_active)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)""",
-                    q, commit=True
-                )
-            
-            # Получаем заново
-            all_daily_quests = await self.fetchall(
-                """SELECT quest_id, quest_type, target_item, target_count, description,
-                          reward_coins, reward_gems, reward_items_json
-                   FROM quests 
-                   WHERE is_daily = 1 AND is_active = 1
-                   ORDER BY RANDOM()
-                   LIMIT 3"""
-            )
-        
-        # Назначаем квесты игроку
-        quests = []
-        for row in all_daily_quests:
-            quest_id = row[0]
-            
-            # Создаём запись в user_quests
-            await self.execute(
-                """INSERT INTO user_quests (user_id, quest_id, assigned_date, progress, completed, claimed)
-                   VALUES (?, ?, ?, 0, 0, 0)""",
-                (user_id, quest_id, today), commit=True
-            )
-            
-            quests.append({
-                'quest_id': row[0],
-                'quest_type': row[1],
-                'target_item': row[2],
-                'target_count': row[3],
-                'description': row[4],
-                'reward_coins': row[5] or 0,
-                'reward_gems': row[6] or 0,
-                'reward_items': json.loads(row[7]) if row[7] else {},
-                'progress': 0,
-                'completed': False,
-                'claimed': False
-            })
-        
-        return quests
     
-    async def get_weekly_quests(self, user_id: int) -> List[Dict]:
-        """Получает еженедельные квесты игрока с прогрессом
-        
-        Согласно ТЗ v4.0 п.7.2 - фиксированные квесты на неделю
-        """
-        from datetime import datetime, date, timedelta
-        
-        # Определяем начало текущей недели (понедельник)
-        today = date.today()
-        week_start = today - timedelta(days=today.weekday())
-        week_start_str = week_start.isoformat()
-        
-        # Проверяем, есть ли уже квесты на эту неделю
-        existing = await self.fetchall(
-            """SELECT uq.*, q.quest_type, q.target_item, q.target_count, q.description,
-                      q.reward_coins, q.reward_gems, q.reward_items_json
-               FROM user_quests uq
-               JOIN quests q ON uq.quest_id = q.quest_id
-               WHERE uq.user_id = ? AND uq.assigned_date = ? AND q.is_weekly = 1
-               ORDER BY q.sort_order""",
-            (user_id, week_start_str)
-        )
-        
-        if existing:
-            quests = []
-            for row in existing:
-                quests.append({
-                    'quest_id': row[2],
-                    'quest_type': row[7],
-                    'target_item': row[8],
-                    'target_count': row[9],
-                    'description': row[10],
-                    'reward_coins': row[11] or 0,
-                    'reward_gems': row[12] or 0,
-                    'reward_items': json.loads(row[13]) if row[13] else {},
-                    'progress': row[4] or 0,
-                    'completed': bool(row[5]),
-                    'claimed': bool(row[6])
-                })
-            return quests
-        
-        # Генерируем новые еженедельные квесты
-        all_weekly_quests = await self.fetchall(
-            """SELECT quest_id, quest_type, target_item, target_count, description,
-                      reward_coins, reward_gems, reward_items_json
-               FROM quests 
-               WHERE is_weekly = 1 AND is_active = 1
-               ORDER BY sort_order"""
-        )
-        
-        if not all_weekly_quests:
-            # Создаём дефолтные еженедельные квесты
-            default_weekly = [
-                ('harvest', None, 50, 'Собери 50 урожаев за неделю', 500, 5, None),
-                ('plant', None, 30, 'Посади 30 семян за неделю', 300, 3, None),
-                ('earn', None, 2000, 'Заработай 2000 монет за неделю', 1000, 10, None),
-            ]
-            
-            for q in default_weekly:
-                await self.execute(
-                    """INSERT INTO quests (quest_type, target_item, target_count, description,
-                        reward_coins, reward_gems, reward_items_json, is_daily, is_weekly, is_active)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, 1)""",
-                    q, commit=True
-                )
-            
-            all_weekly_quests = await self.fetchall(
-                """SELECT quest_id, quest_type, target_item, target_count, description,
-                          reward_coins, reward_gems, reward_items_json
-                   FROM quests 
-                   WHERE is_weekly = 1 AND is_active = 1
-                   ORDER BY sort_order"""
-            )
-        
-        # Назначаем квесты игроку
-        quests = []
-        for row in all_weekly_quests:
-            quest_id = row[0]
-            
-            await self.execute(
-                """INSERT INTO user_quests (user_id, quest_id, assigned_date, progress, completed, claimed)
-                   VALUES (?, ?, ?, 0, 0, 0)""",
-                (user_id, quest_id, week_start_str), commit=True
-            )
-        
-            quests.append({
-                'quest_id': row[0],
-                'quest_type': row[1],
-                'target_item': row[2],
-                'target_count': row[3],
-                'description': row[4],
-                'reward_coins': row[5] or 0,
-                'reward_gems': row[6] or 0,
-                'reward_items': json.loads(row[7]) if row[7] else {},
-                'progress': 0,
-                'completed': False,
-                'claimed': False
-            })
-        
-        return quests
     
-    async def update_quest_progress(self, user_id: int, quest_type: str, amount: int = 1, 
-                                     target_item: str = None) -> List[Dict]:
-        """Обновляет прогресс квестов по типу действия
-        
-        Args:
-            user_id: ID пользователя
-            quest_type: Тип квеста (harvest, plant, earn, sell)
-            amount: Количество для добавления
-            target_item: Конкретный предмет (опционально)
-        
-        Returns:
-            Список выполненных квестов
-        """
-        from datetime import date
-        
-        today = date.today().isoformat()
-        
-        # Находим активные квесты этого типа
-        if target_item:
-            rows = await self.fetchall(
-                """SELECT uq.id, uq.quest_id, uq.progress, q.target_count, q.description
-                   FROM user_quests uq
-                   JOIN quests q ON uq.quest_id = q.quest_id
-                   WHERE uq.user_id = ? AND q.quest_type = ? 
-                   AND (q.target_item IS NULL OR q.target_item = ?)
-                   AND uq.completed = 0""",
-                (user_id, quest_type, target_item)
-            )
-        else:
-            rows = await self.fetchall(
-                """SELECT uq.id, uq.quest_id, uq.progress, q.target_count, q.description
-                   FROM user_quests uq
-                   JOIN quests q ON uq.quest_id = q.quest_id
-                   WHERE uq.user_id = ? AND q.quest_type = ? AND uq.completed = 0""",
-                (user_id, quest_type)
-            )
-        
-        completed_quests = []
-        
-        for row in rows:
-            uq_id = row[0]
-            quest_id = row[1]
-            current_progress = row[2] or 0
-            target_count = row[3]
-            description = row[4]
-            
-            new_progress = current_progress + amount
-            
-            # Проверяем выполнение
-            if new_progress >= target_count:
-                new_progress = target_count
-                completed = 1
-                completed_quests.append({
-                    'quest_id': quest_id,
-                    'description': description
-                })
-            else:
-                completed = 0
-            
-            # Обновляем прогресс
-            await self.execute(
-                """UPDATE user_quests 
-                   SET progress = ?, completed = ? 
-                   WHERE id = ?""",
-                (new_progress, completed, uq_id), commit=True
-            )
-        
-        return completed_quests
     
-    async def update_quest_progress_batch(self, user_id: int, quest_type: str, 
-                                           items: Dict[str, int]) -> List[Dict]:
-        """Пакетное обновление прогресса для нескольких предметов
-        
-        Args:
-            user_id: ID пользователя
-            quest_type: Тип квеста
-            items: Словарь {item_code: amount}
-        """
-        all_completed = []
-        
-        for item_code, amount in items.items():
-            completed = await self.update_quest_progress(user_id, quest_type, amount, item_code)
-            all_completed.extend(completed)
-        
-        # Также обновляем общий прогресс без привязки к предмету
-        total_amount = sum(items.values())
-        completed = await self.update_quest_progress(user_id, quest_type, total_amount, None)
-        all_completed.extend(completed)
-        
-        return all_completed
     
-    async def claim_quest_reward(self, user_id: int, quest_id: int, is_weekly: bool = False) -> Dict:
-        """Получение награды за конкретный квест
-        
-        Args:
-            user_id: ID пользователя
-            quest_id: ID квеста
-            is_weekly: Еженедельный квест
-        """
-        from datetime import date, timedelta
-        
-        if is_weekly:
-            today = date.today()
-            week_start = today - timedelta(days=today.weekday())
-            date_str = week_start.isoformat()
-        else:
-            date_str = date.today().isoformat()
-        
-        # Получаем информацию о квесте
-        row = await self.fetchone(
-            """SELECT uq.id, uq.progress, uq.completed, uq.claimed,
-                      q.target_count, q.reward_coins, q.reward_gems, q.reward_items_json
-               FROM user_quests uq
-               JOIN quests q ON uq.quest_id = q.quest_id
-               WHERE uq.user_id = ? AND uq.quest_id = ? AND uq.assigned_date = ?""",
-            (user_id, quest_id, date_str)
-        )
-        
-        if not row:
-            return {'success': False, 'message': 'Квест не найден'}
-        
-        if not row[2]:  # completed
-            return {'success': False, 'message': 'Квест ещё не выполнен'}
-        
-        if row[3]:  # claimed
-            return {'success': False, 'message': 'Награда уже получена'}
-        
-        # Выдаём награды
-        reward_coins = row[5] or 0
-        reward_gems = row[6] or 0
-        reward_items = json.loads(row[7]) if row[7] else {}
-        
-        # Монеты
-        if reward_coins > 0:
-            await self.update_balance(user_id, reward_coins)
-        
-        # Кристаллы
-        if reward_gems > 0:
-            await self.execute(
-                "UPDATE users SET gems = COALESCE(gems, 0) + ? WHERE user_id = ?",
-                (reward_gems, user_id), commit=True
-            )
-        
-        # Предметы
-        for item_code, qty in reward_items.items():
-            await self.add_inventory(user_id, item_code, qty)
-        
-        # Помечаем как полученное
-        await self.execute(
-            "UPDATE user_quests SET claimed = 1 WHERE id = ?",
-            (row[0],), commit=True
-        )
-        
-        # Логируем
-        await self.log_event('quest', 'INFO', 'claim_reward', user_id,
-                            details={'quest_id': quest_id, 'coins': reward_coins, 'gems': reward_gems})
-        
-        return {
-            'success': True,
-            'coins': reward_coins,
-            'gems': reward_gems,
-            'items': reward_items
-        }
     
-    async def claim_all_quest_rewards(self, user_id: int, is_weekly: bool = False) -> Dict:
-        """Получение всех наград за выполненные квесты
-        
-        Args:
-            user_id: ID пользователя
-            is_weekly: Еженедельные квесты
-        """
-        from datetime import date, timedelta
-        
-        if is_weekly:
-            today = date.today()
-            week_start = today - timedelta(days=today.weekday())
-            date_str = week_start.isoformat()
-        else:
-            date_str = date.today().isoformat()
-        
-        # Получаем выполненные но не полученные квесты
-        rows = await self.fetchall(
-            """SELECT uq.id, uq.quest_id, q.reward_coins, q.reward_gems, q.reward_items_json, q.description
-               FROM user_quests uq
-               JOIN quests q ON uq.quest_id = q.quest_id
-               WHERE uq.user_id = ? AND uq.assigned_date = ? AND uq.completed = 1 AND uq.claimed = 0""",
-            (user_id, date_str)
-        )
-        
-        if not rows:
-            return {'success': False, 'message': 'Нет доступных наград'}
-        
-        total_coins = 0
-        total_gems = 0
-        total_items = {}
-        claimed_quests = []
-        
-        for row in rows:
-            uq_id = row[0]
-            quest_id = row[1]
-            reward_coins = row[2] or 0
-            reward_gems = row[3] or 0
-            reward_items = json.loads(row[4]) if row[4] else {}
-            description = row[5]
-            
-            total_coins += reward_coins
-            total_gems += reward_gems
-            
-            for item_code, qty in reward_items.items():
-                total_items[item_code] = total_items.get(item_code, 0) + qty
-            
-            claimed_quests.append({
-                'quest_id': quest_id,
-                'description': description
-            })
-            
-            # Помечаем как полученное
-            await self.execute(
-                "UPDATE user_quests SET claimed = 1 WHERE id = ?",
-                (uq_id,), commit=True
-            )
-        
-        # Выдаём награды
-        if total_coins > 0:
-            await self.update_balance(user_id, total_coins)
-        
-        if total_gems > 0:
-            await self.execute(
-                "UPDATE users SET gems = COALESCE(gems, 0) + ? WHERE user_id = ?",
-                (total_gems, user_id), commit=True
-            )
-        
-        for item_code, qty in total_items.items():
-            await self.add_inventory(user_id, item_code, qty)
-        
-        # Логируем
-        await self.log_event('quest', 'INFO', 'claim_all_rewards', user_id,
-                            details={'coins': total_coins, 'gems': total_gems, 'count': len(claimed_quests)})
-        
-        return {
-            'success': True,
-            'coins': total_coins,
-            'gems': total_gems,
-            'items': total_items,
-            'claimed_quests': claimed_quests
-        }
     
-    async def refresh_daily_quests(self, user_id: int, cost: int = 50) -> Dict:
-        """Обновление ежедневных квестов за кристаллы
-        
-        Согласно ТЗ v4.0 п.7.1.3 - переброс квестов за 50💎
-        
-        Args:
-            user_id: ID пользователя
-            cost: Стоимость обновления в кристаллах
-        """
-        from datetime import date
-        
-        # Проверяем баланс кристаллов
-        user = await self.get_user(user_id)
-        if not user:
-            return {'success': False, 'message': 'Пользователь не найден'}
-        
-        if user.get('gems', 0) < cost:
-            return {'success': False, 'message': f'Недостаточно кристаллов. Нужно {cost}💎'}
-        
-        # Списываем кристаллы
-        await self.execute(
-            "UPDATE users SET gems = gems - ? WHERE user_id = ?",
-            (cost, user_id), commit=True
-        )
-        
-        # Удаляем текущие квесты
-        today = date.today().isoformat()
-        await self.execute(
-            "DELETE FROM user_quests WHERE user_id = ? AND assigned_date = ?",
-            (user_id, today), commit=True
-        )
-        
-        # Генерируем новые квесты (вызов get_daily_quests создаст новые)
-        
-        # Логируем
-        await self.log_event('quest', 'INFO', 'refresh_quests', user_id,
-                            details={'cost': cost})
-        
-        return {
-            'success': True,
-            'cost': cost
-        }
     
-    async def get_quest_time_left(self, is_weekly: bool = False) -> Dict:
-        """Возвращает время до обновления квестов
-        
-        Args:
-            is_weekly: Для еженедельных квестов
-        
-        Returns:
-            Словарь с hours, minutes, seconds
-        """
-        from datetime import datetime, timedelta
-        
-        now = datetime.now()
-        
-        if is_weekly:
-            # До конца недели (воскресенье 23:59:59)
-            days_until_monday = 7 - now.weekday()
-            if days_until_monday == 7:
-                days_until_monday = 0
-            end_of_week = (now + timedelta(days=days_until_monday)).replace(
-                hour=23, minute=59, second=59, microsecond=0
-            )
-            diff = end_of_week - now
-        else:
-            # До конца дня
-            end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
-            diff = end_of_day - now
-        
-        total_seconds = int(diff.total_seconds())
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        seconds = total_seconds % 60
-        
-        return {
-            'hours': hours,
-            'minutes': minutes,
-            'seconds': seconds
-        }      
-    
-    # ==================== СИСТЕМА КВЕСТОВ (ТЗ v4.0 п.7) ====================
-    
-    async def get_daily_quests(self, user_id: int) -> List[Dict]:
-        """Получает ежедневные квесты пользователя с прогрессом
-        
-        Если у пользователя нет квестов на сегодня - генерирует случайные
-        """
-        from datetime import datetime, date
-        
-        today = date.today().isoformat()
-        
-        # Проверяем, есть ли квесты на сегодня
-        existing = await self.fetchall(
-            """SELECT uq.*, q.* 
-               FROM user_quests uq
-               JOIN quests q ON uq.quest_id = q.quest_id
-               WHERE uq.user_id = ? AND uq.assigned_date = ? AND q.is_daily = 1
-               ORDER BY q.sort_order""",
-            (user_id, today)
-        )
-        
-        if existing:
-            quests = []
-            for row in existing:
-                quests.append({
-                    'quest_id': row[2],
-                    'quest_type': row[8],
-                    'target_item': row[9],
-                    'target_count': row[10],
-                    'description': row[11],
-                    'reward_coins': row[12],
-                    'reward_gems': row[13],
-                    'reward_items': json.loads(row[14]) if row[14] else {},
-                    'progress': row[4] or 0,
-                    'completed': bool(row[5]),
-                    'claimed': bool(row[6])
-                })
-            return quests
-        
-        # Генерируем новые квесты
-        return await self._generate_daily_quests(user_id)
     
     async def _generate_daily_quests(self, user_id: int) -> List[Dict]:
         """Генерирует случайные ежедневные квесты для пользователя"""
@@ -5132,45 +4562,6 @@ class Database:
                 commit=True
             )
     
-    async def get_weekly_quests(self, user_id: int) -> List[Dict]:
-        """Получает еженедельные квесты пользователя с прогрессом"""
-        from datetime import datetime, timedelta
-        
-        # Начало текущей недели (понедельник)
-        today = datetime.now().date()
-        start_of_week = today - timedelta(days=today.weekday())
-        week_start = start_of_week.isoformat()
-        
-        # Проверяем, есть ли квесты на эту неделю
-        existing = await self.fetchall(
-            """SELECT uq.*, q.* 
-               FROM user_quests uq
-               JOIN quests q ON uq.quest_id = q.quest_id
-               WHERE uq.user_id = ? AND uq.assigned_date = ? AND q.is_weekly = 1
-               ORDER BY q.sort_order""",
-            (user_id, week_start)
-        )
-        
-        if existing:
-            quests = []
-            for row in existing:
-                quests.append({
-                    'quest_id': row[2],
-                    'quest_type': row[8],
-                    'target_item': row[9],
-                    'target_count': row[10],
-                    'description': row[11],
-                    'reward_coins': row[12],
-                    'reward_gems': row[13],
-                    'reward_items': json.loads(row[14]) if row[14] else {},
-                    'progress': row[4] or 0,
-                    'completed': bool(row[5]),
-                    'claimed': bool(row[6])
-                })
-            return quests
-        
-        # Генерируем новые еженедельные квесты
-        return await self._generate_weekly_quests(user_id, week_start)
     
     async def _generate_weekly_quests(self, user_id: int, week_start: str) -> List[Dict]:
         """Генерирует еженедельные квесты для пользователя"""
@@ -5233,276 +4624,10 @@ class Database:
                 commit=True
             )
     
-    async def update_quest_progress(self, user_id: int, quest_type: str, count: int = 1, item_code: str = None):
-        """Обновляет прогресс квестов по типу действия
-        
-        Args:
-            user_id: ID пользователя
-            quest_type: Тип действия (harvest, plant, earn, sell)
-            count: Количество/сумма для добавления
-            item_code: Код предмета (опционально)
-        """
-        from datetime import date, datetime, timedelta
-        
-        today = date.today().isoformat()
-        
-        # Начало текущей недели
-        today_date = datetime.now().date()
-        start_of_week = today_date - timedelta(days=today_date.weekday())
-        week_start = start_of_week.isoformat()
-        
-        # Обновляем ежедневные квесты
-        if item_code:
-            await self.execute(
-                """UPDATE user_quests 
-                   SET progress = progress + ?,
-                       completed = CASE WHEN progress + ? >= (SELECT target_count FROM quests WHERE quest_id = user_quests.quest_id) THEN 1 ELSE 0 END
-                   WHERE user_id = ? AND assigned_date = ? 
-                   AND quest_id IN (SELECT quest_id FROM quests WHERE quest_type = ? AND (target_item IS NULL OR target_item = ?) AND is_daily = 1)""",
-                (count, count, user_id, today, quest_type, item_code),
-                commit=True
-            )
-        else:
-            await self.execute(
-                """UPDATE user_quests 
-                   SET progress = progress + ?,
-                       completed = CASE WHEN progress + ? >= (SELECT target_count FROM quests WHERE quest_id = user_quests.quest_id) THEN 1 ELSE 0 END
-                   WHERE user_id = ? AND assigned_date = ? 
-                   AND quest_id IN (SELECT quest_id FROM quests WHERE quest_type = ? AND is_daily = 1)""",
-                (count, count, user_id, today, quest_type),
-                commit=True
-            )
-        
-        # Обновляем еженедельные квесты
-        if item_code:
-            await self.execute(
-                """UPDATE user_quests 
-                   SET progress = progress + ?,
-                       completed = CASE WHEN progress + ? >= (SELECT target_count FROM quests WHERE quest_id = user_quests.quest_id) THEN 1 ELSE 0 END
-                   WHERE user_id = ? AND assigned_date = ? 
-                   AND quest_id IN (SELECT quest_id FROM quests WHERE quest_type = ? AND (target_item IS NULL OR target_item = ?) AND is_weekly = 1)""",
-                (count, count, user_id, week_start, quest_type, item_code),
-                commit=True
-            )
-        else:
-            await self.execute(
-                """UPDATE user_quests 
-                   SET progress = progress + ?,
-                       completed = CASE WHEN progress + ? >= (SELECT target_count FROM quests WHERE quest_id = user_quests.quest_id) THEN 1 ELSE 0 END
-                   WHERE user_id = ? AND assigned_date = ? 
-                   AND quest_id IN (SELECT quest_id FROM quests WHERE quest_type = ? AND is_weekly = 1)""",
-                (count, count, user_id, week_start, quest_type),
-                commit=True
-            )
     
-    async def update_quest_progress_batch(self, user_id: int, quest_type: str, count: int = 1, item_codes: List[str] = None):
-        """Пакетное обновление прогресса квестов
-        
-        Args:
-            user_id: ID пользователя
-            quest_type: Тип действия
-            count: Общее количество
-            item_codes: Список кодов предметов
-        """
-        # Обновляем общий прогресс
-        await self.update_quest_progress(user_id, quest_type, count)
-        
-        # Если есть конкретные предметы - обновляем для каждого
-        if item_codes:
-            for item_code in item_codes:
-                await self.update_quest_progress(user_id, quest_type, 1, item_code)
     
-    async def claim_quest_reward(self, user_id: int, quest_id: int, is_weekly: bool = False) -> Dict:
-        """Получение награды за конкретный квест
-        
-        Args:
-            user_id: ID пользователя
-            quest_id: ID квеста
-            is_weekly: Еженедельный квест
-        
-        Returns:
-            Результат с наградами
-        """
-        from datetime import date, datetime, timedelta
-        
-        if is_weekly:
-            today_date = datetime.now().date()
-            start_of_week = today_date - timedelta(days=today_date.weekday())
-            assigned_date = start_of_week.isoformat()
-        else:
-            assigned_date = date.today().isoformat()
-        
-        # Получаем информацию о квесте
-        quest_row = await self.fetchone(
-            """SELECT uq.*, q.* FROM user_quests uq
-               JOIN quests q ON uq.quest_id = q.quest_id
-               WHERE uq.user_id = ? AND uq.quest_id = ? AND uq.assigned_date = ?""",
-            (user_id, quest_id, assigned_date)
-        )
-        
-        if not quest_row:
-            return {"success": False, "message": "Квест не найден"}
-        
-        if not quest_row[5]:  # completed
-            return {"success": False, "message": "Квест ещё не выполнен"}
-        
-        if quest_row[6]:  # claimed
-            return {"success": False, "message": "Награда уже получена"}
-        
-        # Выдаём награды
-        reward_coins = quest_row[12]
-        reward_gems = quest_row[13]
-        reward_items = json.loads(quest_row[14]) if quest_row[14] else {}
-        
-        # Монеты
-        if reward_coins > 0:
-            await self.update_balance(user_id, reward_coins)
-        
-        # Кристаллы
-        if reward_gems > 0:
-            await self.execute(
-                "UPDATE users SET gems = COALESCE(gems, 0) + ? WHERE user_id = ?",
-                (reward_gems, user_id), commit=True
-            )
-        
-        # Предметы
-        for item_code, qty in reward_items.items():
-            await self.add_inventory(user_id, item_code, qty)
-        
-        # Помечаем как полученное
-        await self.execute(
-            "UPDATE user_quests SET claimed = 1 WHERE id = ?",
-            (quest_row[0],), commit=True
-        )
-        
-        # Логируем
-        await self.log_event('quest', 'INFO', 'claim_reward', user_id,
-                            details={"quest_id": quest_id, "coins": reward_coins, "gems": reward_gems})
-        
-        return {
-            "success": True,
-            "coins": reward_coins,
-            "gems": reward_gems,
-            "items": reward_items,
-            "description": quest_row[11]
-        }
     
-    async def claim_all_quest_rewards(self, user_id: int, is_weekly: bool = False) -> Dict:
-        """Получение всех наград за выполненные квесты
-        
-        Args:
-            user_id: ID пользователя
-            is_weekly: Еженедельные квесты
-        
-        Returns:
-            Результат с общими наградами
-        """
-        from datetime import date, datetime, timedelta
-        
-        if is_weekly:
-            today_date = datetime.now().date()
-            start_of_week = today_date - timedelta(days=today_date.weekday())
-            assigned_date = start_of_week.isoformat()
-        else:
-            assigned_date = date.today().isoformat()
-        
-        # Получаем выполненные но не полученные квесты
-        quests = await self.fetchall(
-            """SELECT uq.*, q.* FROM user_quests uq
-               JOIN quests q ON uq.quest_id = q.quest_id
-               WHERE uq.user_id = ? AND uq.assigned_date = ? 
-               AND uq.completed = 1 AND uq.claimed = 0""",
-            (user_id, assigned_date)
-        )
-        
-        if not quests:
-            return {"success": False, "message": "Нет доступных наград"}
-        
-        total_coins = 0
-        total_gems = 0
-        total_items = {}
-        claimed_quests = []
-        
-        for quest in quests:
-            quest_id = quest[2]
-            reward_coins = quest[12]
-            reward_gems = quest[13]
-            reward_items = json.loads(quest[14]) if quest[14] else {}
-            
-            total_coins += reward_coins
-            total_gems += reward_gems
-            
-            for item, qty in reward_items.items():
-                total_items[item] = total_items.get(item, 0) + qty
-            
-            claimed_quests.append({
-                "quest_id": quest_id,
-                "description": quest[11]
-            })
-            
-            # Помечаем как полученное
-            await self.execute(
-                "UPDATE user_quests SET claimed = 1 WHERE id = ?",
-                (quest[0],), commit=True
-            )
-        
-        # Выдаём награды
-        if total_coins > 0:
-            await self.update_balance(user_id, total_coins)
-        
-        if total_gems > 0:
-            await self.execute(
-                "UPDATE users SET gems = COALESCE(gems, 0) + ? WHERE user_id = ?",
-                (total_gems, user_id), commit=True
-            )
-        
-        for item_code, qty in total_items.items():
-            await self.add_inventory(user_id, item_code, qty)
-        
-        # Логируем
-        await self.log_event('quest', 'INFO', 'claim_all_rewards', user_id,
-                            details={"count": len(claimed_quests), "coins": total_coins, "gems": total_gems})
-        
-        return {
-            "success": True,
-            "coins": total_coins,
-            "gems": total_gems,
-            "items": total_items,
-            "claimed_quests": claimed_quests
-        }
     
-    async def get_quest_time_left(self, is_weekly: bool = False) -> Dict:
-        """Возвращает время до обновления квестов
-        
-        Args:
-            is_weekly: Для еженедельных квестов
-        
-        Returns:
-            Словарь с часами и минутами
-        """
-        from datetime import datetime, timedelta
-        
-        now = datetime.now()
-        
-        if is_weekly:
-            # До конца недели (воскресенье 23:59:59)
-            days_until_monday = 7 - now.weekday()
-            end_of_week = (now + timedelta(days=days_until_monday)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            diff = end_of_week - now
-        else:
-            # До конца дня
-            end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
-            diff = end_of_day - now
-        
-        total_seconds = int(diff.total_seconds())
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        
-        return {"hours": hours, "minutes": minutes}
-    
-    # ==================== СИСТЕМА XP И УРОВНЕЙ (ТЗ v4.0 п.9) ====================
     
     async def add_xp(self, user_id: int, amount: int, source: str = None) -> Dict:
         """Добавляет опыт пользователю
@@ -5734,215 +4859,10 @@ class Database:
         
         return base_reward
     
-    async def refresh_daily_quests(self, user_id: int, cost: int = 50) -> Dict:
-        """Обновление ежедневных квестов за кристаллы
-        
-        Args:
-            user_id: ID пользователя
-            cost: Стоимость обновления
-        
-        Returns:
-            Результат операции
-        """
-        from datetime import date
-        
-        # Проверяем баланс
-        user = await self.get_user(user_id)
-        if not user:
-            return {"success": False, "message": "Пользователь не найден"}
-        
-        if user.get('gems', 0) < cost:
-            return {"success": False, "message": "Недостаточно кристаллов"}
-        
-        # Списываем кристаллы
-        await self.execute(
-            "UPDATE users SET gems = gems - ? WHERE user_id = ?",
-            (cost, user_id), commit=True
-        )
-        
-        # Удаляем текущие квесты
-        today = date.today().isoformat()
-        await self.execute(
-            "DELETE FROM user_quests WHERE user_id = ? AND assigned_date = ?",
-            (user_id, today), commit=True
-        )
-        
-        # Генерируем новые
-        new_quests = await self._generate_daily_quests(user_id)
-        
-        # Логируем
-        await self.log_event('quest', 'INFO', 'refresh_quests', user_id,
-                            details={"cost": cost, "new_count": len(new_quests)})
-        
-        return {"success": True, "quests": new_quests}      
     
-    # ==================== МЕТОДЫ ДЛЯ ПРОФИЛЯ И ДОСТИЖЕНИЙ ====================
     
-    async def get_profile_achievements(self, user_id: int) -> List[Dict]:
-        """Получает выбранные достижения для отображения в профиле
-        
-        Returns:
-            Список выбранных достижений (до 4 штук)
-        """
-        rows = await self.fetchall(
-            """SELECT a.achievement_id, a.code, a.name, a.icon, a.category_id,
-                      upa.slot_number
-               FROM user_profile_achievements upa
-               JOIN achievements a ON upa.achievement_id = a.achievement_id
-               WHERE upa.user_id = ?
-               ORDER BY upa.slot_number""",
-            (user_id,)
-        )
-        
-        return [{
-            "id": r[0],
-            "code": r[1],
-            "name": r[2],
-            "icon": r[3],
-            "category_id": r[4],
-            "slot": r[5]
-        } for r in rows]
     
-    async def get_user_completed_achievements(self, user_id: int) -> List[Dict]:
-        """Получает список выполненных достижений пользователя
-        
-        Returns:
-            Список выполненных достижений
-        """
-        rows = await self.fetchall(
-            """SELECT a.achievement_id, a.code, a.name, a.icon, a.category_id,
-                      a.reward_coins, a.reward_gems, pa.completed_at
-               FROM player_achievements pa
-               JOIN achievements a ON pa.achievement_id = a.achievement_id
-               WHERE pa.user_id = ? AND pa.completed = 1
-               ORDER BY pa.completed_at DESC""",
-            (user_id,)
-        )
-        
-        return [{
-            "id": r[0],
-            "code": r[1],
-            "name": r[2],
-            "icon": r[3],
-            "category_id": r[4],
-            "reward_coins": r[5],
-            "reward_gems": r[6],
-            "completed_at": r[7]
-        } for r in rows]
     
-    async def set_profile_achievements(self, user_id: int, achievement_ids: List[int]) -> bool:
-        """Сохраняет выбранные достижения для профиля
-        
-        Args:
-            user_id: ID пользователя
-            achievement_ids: Список ID достижений (до 4 штук)
-        
-        Returns:
-            True если успешно
-        """
-        # Удаляем текущий выбор
-        await self.execute(
-            "DELETE FROM user_profile_achievements WHERE user_id = ?",
-            (user_id,), commit=True
-        )
-        
-        # Добавляем новые
-        for slot, ach_id in enumerate(achievement_ids[:4], start=1):
-            # Проверяем что ачивка выполнена
-            completed = await self.fetchone(
-                """SELECT 1 FROM player_achievements 
-                   WHERE user_id = ? AND achievement_id = ? AND completed = 1""",
-                (user_id, ach_id)
-            )
-            
-            if completed:
-                await self.execute(
-                    """INSERT INTO user_profile_achievements 
-                       (user_id, achievement_id, slot_number)
-                       VALUES (?, ?, ?)""",
-                    (user_id, ach_id, slot), commit=True
-                )
-        
-        return True
-    
-    async def get_user_activity_history(self, user_id: int, limit: int = 20) -> List[Dict]:
-        """Получает историю активности пользователя
-        
-        Объединяет данные из разных таблиц логов
-        
-        Args:
-            user_id: ID пользователя
-            limit: Максимальное количество записей
-        
-        Returns:
-            Список записей истории
-        """
-        # Получаем из экономических логов
-        economy_logs = await self.fetchall(
-            """SELECT 'economy' as type, operation_type as action, 
-                      amount, currency_type, created_at
-               FROM economy_logs
-               WHERE user_id = ?
-               ORDER BY created_at DESC
-               LIMIT ?""",
-            (user_id, limit)
-        )
-        
-        # Получаем из логов достижений
-        achievement_logs = await self.fetchall(
-            """SELECT 'achievement' as type, action, 
-                      achievement_id as extra, created_at
-               FROM achievement_logs
-               WHERE user_id = ?
-               ORDER BY created_at DESC
-               LIMIT ?""",
-            (user_id, limit)
-        )
-        
-        # Получаем из логов прогресса
-        progression_logs = await self.fetchall(
-            """SELECT 'progression' as type, progression_type as action,
-                      old_value, new_value, created_at
-               FROM progression_logs
-               WHERE user_id = ?
-               ORDER BY created_at DESC
-               LIMIT ?""",
-            (user_id, limit)
-        )
-        
-        # Объединяем и сортируем
-        all_logs = []
-        
-        for log in economy_logs:
-            all_logs.append({
-                "type": log[0],
-                "action": log[1],
-                "amount": log[2],
-                "currency": log[3],
-                "timestamp": log[4]
-            })
-        
-        for log in achievement_logs:
-            all_logs.append({
-                "type": log[0],
-                "action": log[1],
-                "achievement_id": log[2],
-                "timestamp": log[3]
-            })
-        
-        for log in progression_logs:
-            all_logs.append({
-                "type": log[0],
-                "action": log[1],
-                "old_value": log[2],
-                "new_value": log[3],
-                "timestamp": log[4]
-            })
-        
-        # Сортируем по времени
-        all_logs.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-        
-        return all_logs[:limit]
     
     async def update_username(self, user_id: int, new_username: str) -> Dict:
         """Обновляет никнейм пользователя
@@ -5989,68 +4909,8 @@ class Database:
         
         return {"success": True, "username": new_username}
     
-    async def update_user_settings(self, user_id: int, settings: Dict) -> bool:
-        """Обновляет настройки пользователя
-        
-        Args:
-            user_id: ID пользователя
-            settings: Словарь настроек
-        
-        Returns:
-            True если успешно
-        """
-        settings_json = json.dumps(settings) if settings else '{}'
-        
-        await self.execute(
-            "UPDATE users SET settings = ? WHERE user_id = ?",
-            (settings_json, user_id), commit=True
-        )
     
-        return True
     
-    async def log_security(self, event_type: str, user_id: int = None, admin_id: int = None,
-                           ban_reason: str = None, ban_duration: int = None, **kwargs):
-        """Логирует события безопасности
-        
-        Args:
-            event_type: Тип события (ban, unban, warning, etc.)
-            user_id: ID пользователя
-            admin_id: ID админа
-            ban_reason: Причина бана
-            ban_duration: Длительность бана
-        """
-        details = json.dumps(kwargs) if kwargs else None
-        
-        await self.execute(
-            """INSERT INTO security_logs 
-               (event_type, user_id, admin_id, ban_reason, ban_duration, details)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (event_type, user_id, admin_id, ban_reason, ban_duration, details),
-            commit=True
-        )
-    
-    async def log_event(self, log_group: str, log_level: str, action: str, 
-                        user_id: int = None, target_id: int = None, details: dict = None):
-        """Логирует общие события
-        
-        Args:
-            log_group: Группа лога (economy, quest, achievement, etc.)
-            log_level: Уровень (INFO, WARNING, ERROR)
-            action: Действие
-            user_id: ID пользователя
-            target_id: ID цели
-            details: Дополнительные данные
-        """
-        details_json = json.dumps(details) if details else None
-        
-        await self.execute(
-            """INSERT INTO logs (log_group, log_level, user_id, action, target_id, details)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (log_group, log_level, user_id, action, target_id, details_json),
-            commit=True
-        )
-    
-    # ==================== ТОП ИГРОКОВ / ТАБЛИЦА ЛИДЕРОВ (ТЗ v4.0 п.14, п.17) ====================
     
     async def get_leaderboard(self, category: str = 'balance', limit: int = 10, 
                                user_id: int = None) -> Dict:
@@ -7318,86 +6178,6 @@ class Database:
             "status": status
         }
     
-    async def claim_daily_bonus(self, user_id: int) -> Dict:
-        """Получает ежедневный бонус с рулеткой
-        
-        Args:
-            user_id: ID пользователя
-            
-        Returns:
-            Результат получения бонуса
-        """
-        # Проверяем можно ли забрать
-        streak_data = await self.get_daily_bonus_streak(user_id)
-        
-        if not streak_data['can_claim']:
-            return {"success": False, "message": "Бонус уже получен сегодня"}
-        
-        # Проводим рулетку
-        roll_result = await self.roll_daily_bonus(user_id)
-        rewards = roll_result['rewards']
-        new_streak = roll_result['streak']
-        
-        # Считаем общие награды
-        total_coins = 0
-        total_gems = 0
-        items_to_add = []
-        
-        for r in rewards:
-            if r['type'] == 'coins' or r['type'] == 'jackpot':
-                total_coins += r['amount']
-            elif r['type'] == 'gems':
-                total_gems += r['amount']
-            elif r['item_code']:
-                items_to_add.append({
-                    "item_code": r['item_code'],
-                    "amount": r['amount'],
-                    "name": r['name'],
-                    "icon": r['icon']
-                })
-        
-        async with self.lock:
-            db = await self.connect()
-            await db.execute("BEGIN")
-            try:
-                # Обновляем баланс
-                if total_coins > 0:
-                    await db.execute(
-                        "UPDATE users SET balance = balance + ? WHERE user_id = ?",
-                        (total_coins, user_id)
-                    )
-                
-                if total_gems > 0:
-                    await db.execute(
-                        "UPDATE users SET gems = gems + ? WHERE user_id = ?",
-                        (total_gems, user_id)
-                    )
-                
-                # Добавляем предметы
-                for item in items_to_add:
-                    await self._add_inventory_internal(db, user_id, item['item_code'], item['amount'])
-                
-                # Логируем бонус
-                await db.execute(
-                    """INSERT INTO daily_bonus_history 
-                       (user_id, streak, reward_type, reward_amount, claimed_at)
-                       VALUES (?, ?, ?, ?, datetime('now'))""",
-                    (user_id, new_streak, 'mixed', total_coins + total_gems)
-                )
-                
-                await db.commit()
-                
-                return {
-                    "success": True,
-                    "streak": new_streak,
-                    "rewards": rewards,
-                    "total_coins": total_coins,
-                    "total_gems": total_gems,
-                    "items": items_to_add
-                }
-            except Exception as e:
-                await db.rollback()
-                raise
     
     async def _add_inventory_internal(self, db, user_id: int, item_code: str, amount: int):
         """Внутренний метод для добавления предмета в инвентарь (внутри транзакции)
@@ -7808,159 +6588,8 @@ class Database:
                 await db.rollback()
                 raise
     
-    async def create_promocode(self, code: str, promo_type: str, 
-                                reward_coins: int = 0, reward_gems: int = 0,
-                                reward_items: str = None, valid_days: int = None,
-                                max_activations: int = 0, admin_id: int = None) -> Dict:
-        """Создаёт новый промокод (для админки)
-        
-        Args:
-            code: Код промокода
-            promo_type: Тип (daily, event, starter)
-            reward_coins: Монеты
-            reward_gems: Кристаллы
-            reward_items: JSON с предметами
-            valid_days: Дней действия
-            max_activations: Максимум активаций
-            admin_id: ID создателя
-            
-        Returns:
-            Результат создания
-        """
-        code = code.upper().strip()
-        
-        # Проверяем уникальность
-        existing = await self.fetchone(
-            "SELECT 1 FROM promocodes WHERE code = ?",
-            (code,)
-        )
-        
-        if existing:
-            return {"success": False, "message": "Промокод с таким кодом уже существует!"}
-        
-        # Рассчитываем дату окончания
-        valid_until = None
-        if valid_days and valid_days > 0:
-            from datetime import datetime, timedelta
-            valid_until = (datetime.now() + timedelta(days=valid_days)).isoformat()
-        
-        try:
-            await self.execute(
-                """INSERT INTO promocodes 
-                   (code, type, reward_coins, reward_gems, reward_items,
-                    valid_until, max_activations, created_by)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (code, promo_type, reward_coins, reward_gems, reward_items,
-                 valid_until, max_activations, admin_id),
-                commit=True
-            )
-            
-            # Логируем
-            await self.execute(
-                """INSERT INTO promo_logs (promo_code, admin_id, action, details)
-                   VALUES (?, ?, 'created', ?)""",
-                (code, admin_id, f"Type: {promo_type}"),
-                commit=True
-            )
-            
-            return {
-                "success": True,
-                "code": code,
-                "message": f"Промокод {code} создан!"
-            }
-        except Exception as e:
-            return {"success": False, "message": f"Ошибка создания: {str(e)}"}
     
-    async def get_promocode_stats(self, code: str = None) -> Dict:
-        """Получает статистику по промокодам
-        
-        Args:
-            code: Конкретный код (если None - общая статистика)
-            
-        Returns:
-            Статистика
-        """
-        if code:
-            # Статистика по конкретному промокоду
-            promo = await self.fetchone(
-                """SELECT code, times_used, max_activations, 
-                          created_at, valid_until, is_active
-                   FROM promocodes WHERE code = ?""",
-                (code.upper(),)
-            )
-            
-            if not promo:
-                return {}
-            
-            # Получаем список активаций
-            activations = await self.fetchall(
-                """SELECT pa.user_id, u.username, pa.activated_at
-                   FROM promo_activations pa
-                   JOIN users u ON pa.user_id = u.user_id
-                   WHERE pa.promo_id = (SELECT id FROM promocodes WHERE code = ?)
-                   ORDER BY pa.activated_at DESC
-                   LIMIT 50""",
-                (code.upper(),)
-            )
-            
-            return {
-                "code": promo[0],
-                "times_used": promo[1],
-                "max_activations": promo[2],
-                "created_at": promo[3],
-                "valid_until": promo[4],
-                "is_active": bool(promo[5]),
-                "activations": [{
-                    "user_id": a[0],
-                    "username": a[1],
-                    "activated_at": a[2]
-                } for a in activations]
-            }
-        else:
-            # Общая статистика
-            total = await self.fetchone("SELECT COUNT(*) FROM promocodes")
-            active = await self.fetchone(
-                "SELECT COUNT(*) FROM promocodes WHERE is_active = 1"
-            )
-            total_activations = await self.fetchone(
-                "SELECT COUNT(*) FROM promo_activations"
-            )
-            
-            return {
-                "total_promocodes": total[0],
-                "active_promocodes": active[0],
-                "total_activations": total_activations[0]
-            }
     
-    async def toggle_promocode(self, code: str, active: bool, admin_id: int = None) -> bool:
-        """Включает/выключает промокод
-        
-        Args:
-            code: Код промокода
-            active: Активировать или деактивировать
-            admin_id: ID админа
-            
-        Returns:
-            True если успешно
-        """
-        await self.execute(
-            "UPDATE promocodes SET is_active = ? WHERE code = ?",
-            (1 if active else 0, code.upper()),
-            commit=True
-        )
-        
-        # Логируем
-        action = "activated" if active else "deactivated"
-        await self.execute(
-            """INSERT INTO promo_logs (promo_code, admin_id, action)
-               VALUES (?, ?, ?)""",
-            (code.upper(), admin_id, action),
-            commit=True
-        )
-        
-        return True
-    
-    # ==================== РЕФЕРАЛЬНАЯ СИСТЕМА (ТЗ v4.0 п.15) ====================
     
     async def get_referral_link(self, user_id: int) -> str:
         """Получает реферальную ссылку пользователя
@@ -8272,23 +6901,6 @@ class Database:
             } for row in top]
         }
     
-    async def update_event_score(self, user_id: int, event_id: int, points: int):
-        """Обновляет счёт пользователя в ивенте
-        
-        Args:
-            user_id: ID пользователя
-            event_id: ID ивента
-            points: Очки для добавления
-        """
-        await self.execute(
-            """INSERT INTO event_leaderboard (event_id, user_id, score)
-               VALUES (?, ?, ?)
-               ON CONFLICT(event_id, user_id) DO UPDATE 
-               SET score = score + excluded.score,
-                   updated_at = CURRENT_TIMESTAMP""",
-            (event_id, user_id, points),
-            commit=True
-        )
     
     async def add_event_crop(self, user_id: int, event_crop_code: str, quantity: int = 1):
         """Добавляет ивентовый урожай пользователю
@@ -8781,35 +7393,6 @@ class Database:
                 logging.error(f"Admin unban error: {e}")
                 return False
     
-    async def get_admin_logs(self, limit: int = 50) -> List[Dict]:
-        """Получает логи действий админов
-        
-        Args:
-            limit: Количество записей
-            
-        Returns:
-            Список логов
-        """
-        rows = await self.fetchall(
-            """SELECT al.*, u.username as admin_username, tu.username as target_username
-               FROM admin_logs al
-               LEFT JOIN users u ON al.admin_id = u.user_id
-               LEFT JOIN users tu ON al.target_user_id = tu.user_id
-               ORDER BY al.created_at DESC
-               LIMIT ?""",
-            (limit,)
-        )
-        
-        return [{
-            "log_id": row[0],
-            "admin_id": row[1],
-            "admin_username": row[9],
-            "action": row[3],
-            "target_user_id": row[4],
-            "target_username": row[10],
-            "details": row[8],
-            "created_at": row[7]
-        } for row in rows]
 
     async def admin_update_plant(self, admin_id: int, plant_code: str, **kwargs) -> bool:
         """Обновляет параметры растения
