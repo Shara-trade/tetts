@@ -1078,17 +1078,32 @@ class Database:
         )
         
     async def get_user(self, user_id: int) -> Optional[Dict]:
+        # Явно указываем поля в нужном порядке вместо SELECT *
         row = await self.fetchone(
-            "SELECT * FROM users WHERE user_id = ? AND is_banned = 0", (user_id,)
+            """SELECT user_id, first_name, username, balance, gems, 
+                prestige_level, prestige_multiplier, xp, level, city_level,
+                total_harvested, total_planted, total_earned, total_spent,
+                joined_date, last_activity, is_banned, ban_reason, ban_until,
+                last_daily_claim, daily_streak, settings, selected_achievements
+            FROM users WHERE user_id = ? AND is_banned = 0""", 
+            (user_id,)
         )
         if row:
-            # Проверяем наличие поля settings (индекс 18 после всех основных полей)
+            # Парсим settings JSON
             settings = {}
-            if len(row) > 18 and row[18]:
+            if row[21]:  # settings column
                 try:
-                    settings = json.loads(row[18])
+                    settings = json.loads(row[21])
                 except (json.JSONDecodeError, TypeError):
                     settings = {}
+            
+            # Парсим selected_achievements JSON
+            selected_achievements = []
+            if row[22]:  # selected_achievements column
+                try:
+                    selected_achievements = json.loads(row[22])
+                except (json.JSONDecodeError, TypeError):
+                    selected_achievements = []
         
             return {
                 "user_id": row[0],
@@ -1105,12 +1120,12 @@ class Database:
                 "total_planted": row[11] or 0, 
                 "total_earned": row[12] or 0, 
                 "total_spent": row[13] or 0,
-                "joined_date": row[14] if len(row) > 14 else None,
-                "last_activity": row[15] if len(row) > 15 else None,
-                "is_banned": row[16] if len(row) > 16 else 0,
-                "daily_streak": row[20] if len(row) > 20 else 0,
+                "joined_date": row[14],
+                "last_activity": row[15],
+                "is_banned": row[16] or 0,
+                "daily_streak": row[20] or 0,
                 "settings": settings,
-                "selected_achievements": []
+                "selected_achievements": selected_achievements
             }
         return None
     
