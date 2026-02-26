@@ -118,8 +118,24 @@ async def get_db():
 
 async def check_admin_access(user_id: int) -> str:
     """Проверяет доступ и возвращает роль"""
-    db = await get_db()
-    return await db.get_admin_role(user_id)
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[ADMIN] Запрос роли для user_id={user_id}")
+    print(f"[ADMIN] Запрос роли для user_id={user_id}")
+    
+    try:
+        db = await get_db()
+        role = await db.get_admin_role(user_id)
+        logger.info(f"[ADMIN] Получена роль для user_id={user_id}: {role}")
+        print(f"[ADMIN] Получена роль для user_id={user_id}: {role}")
+        return role
+    except Exception as e:
+        logger.error(f"[ADMIN] ОШИБКА при получении роли для user_id={user_id}: {e}")
+        print(f"[ADMIN] ОШИБКА при получении роли: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def get_role_emoji(role: str) -> str:
     return {'creator': '👑', 'admin': '⚡️', 'moderator': '🛡️'}.get(role, '❓')
@@ -168,18 +184,51 @@ async def log_admin_action(admin_id: int, action: str, target_id: int = None, de
 @router.message(Command("admin"))
 async def admin_main_menu(message: Message, state: FSMContext):
     """Главное меню админ-панели"""
-    await state.clear()
-    await show_admin_menu(message, message.from_user.id)
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    user_id = message.from_user.id
+    username = message.from_user.username or "no_username"
+    
+    logger.info(f"[ADMIN] Вызов /admin от user_id={user_id}, username=@{username}")
+    print(f"[ADMIN] Вызов /admin от user_id={user_id}, username=@{username}")
+    
+    try:
+        await state.clear()
+        logger.info(f"[ADMIN] Состояние очищено для user_id={user_id}")
+        await show_admin_menu(message, user_id)
+        logger.info(f"[ADMIN] Меню успешно показано для user_id={user_id}")
+    except Exception as e:
+        logger.error(f"[ADMIN] ОШИБКА при вызове /admin для user_id={user_id}: {e}")
+        print(f"[ADMIN] ОШИБКА: {e}")
+        import traceback
+        traceback.print_exc()
+        await message.answer(f"❌ Произошла ошибка при открытии админ-панели: {e}")
 
 async def show_admin_menu(target, user_id: int, edit: bool = False):
     """Показывает меню админки"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[ADMIN] Проверка доступа для user_id={user_id}")
+    print(f"[ADMIN] Проверка доступа для user_id={user_id}")
+    
     role = await check_admin_access(user_id)
+    
+    logger.info(f"[ADMIN] Роль пользователя user_id={user_id}: {role}")
+    print(f"[ADMIN] Роль пользователя user_id={user_id}: {role}")
+    
     if not role:
+        logger.warning(f"[ADMIN] Доступ запрещен для user_id={user_id}")
+        print(f"[ADMIN] Доступ запрещен для user_id={user_id}")
         if isinstance(target, CallbackQuery):
             await target.answer("⛔ У тебя нет доступа к админ-панели!", show_alert=True)
         else:
             await target.answer("⛔ У тебя нет доступа к админ-панели!")
         return
+    
+    logger.info(f"[ADMIN] Доступ разрешен для user_id={user_id}, роль={role}")
+    print(f"[ADMIN] Доступ разрешен для user_id={user_id}, роль={role}")
     
     # Базовые разделы для всех
     buttons = [
@@ -210,7 +259,7 @@ async def show_admin_menu(target, user_id: int, edit: bool = False):
         f"ID: <code>{user_id}</code>\n\n"
         f"Выбери раздел:"
     )
-    
+
     if isinstance(target, CallbackQuery):
         if edit:
             await target.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -224,7 +273,7 @@ async def admin_back_to_main(callback: CallbackQuery, state: FSMContext):
     """Возврат в главное меню"""
     await state.clear()
     await show_admin_menu(callback, callback.from_user.id, edit=True)
-
+    
 @router.callback_query(F.data == "noop")
 async def noop_handler(callback: CallbackQuery):
     """Пустой обработчик для кнопок без действия"""
@@ -236,7 +285,7 @@ async def noop_handler(callback: CallbackQuery):
 async def admin_players_menu(callback: CallbackQuery, state: FSMContext):
     """Меню управления игроками"""
     await state.clear()
-    
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Поиск", callback_data="admin_search_unified")],
         [InlineKeyboardButton(text="📋 Список игроков", callback_data="admin_list_players_0")],
@@ -274,7 +323,7 @@ async def admin_process_search_unified(message: Message, state: FSMContext):
     text = message.text.strip()
     db = await get_db()
     user = None
-
+    
     # Проверяем: число -> ID, текст -> username
     if text.isdigit():
         # Поиск по ID
@@ -312,7 +361,7 @@ async def admin_last_players(callback: CallbackQuery):
            FROM users WHERE is_banned = 0 
            ORDER BY joined_date DESC LIMIT 10"""
     )
-    
+
     if not rows:
         await callback.answer("Нет зарегистрированных игроков!")
         return
